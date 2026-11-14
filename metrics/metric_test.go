@@ -15,15 +15,15 @@ func TestNewMetric(t *testing.T) {
 	}{
 		"Counter": {Counter, &CounterSink{}},
 		"Gauge":   {Gauge, &GaugeSink{}},
-		"Trend":   {Trend, &TrendSink{}},
+		"Trend":   {Trend, NewTrendSink()},
 		"Rate":    {Rate, &RateSink{}},
 	}
 
 	for name, data := range testdata {
-		name, data := name, data
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			m := newMetric("my_metric", data.Type)
+			r := NewRegistry()
+			m := r.newMetric("my_metric", data.Type)
 			assert.Equal(t, "my_metric", m.Name)
 			assert.IsType(t, data.SinkType, m.Sink)
 		})
@@ -50,11 +50,11 @@ func TestAddSubmetric(t *testing.T) {
 	}
 
 	for name, expected := range testdata {
-		name, expected := name, expected
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			m := newMetric("metric", Trend)
+			r := NewRegistry()
+			m := r.MustNewMetric("metric", Trend)
 			sm, err := m.AddSubmetric(name)
 			if expected.err {
 				require.Error(t, err)
@@ -62,7 +62,7 @@ func TestAddSubmetric(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, sm)
-			assert.EqualValues(t, expected.tags, sm.Tags.tags)
+			assert.EqualValues(t, expected.tags, sm.Tags.Map())
 		})
 	}
 }
@@ -167,8 +167,6 @@ func TestParseMetricName(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
-
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -187,12 +185,12 @@ func TestParseMetricName(t *testing.T) {
 			}
 
 			assert.Equal(t,
-				gotMetricName, tt.wantMetricName,
+				tt.wantMetricName, gotMetricName,
 				"ParseMetricName() gotMetricName = %v, want %v", gotMetricName, tt.wantMetricName,
 			)
 
 			assert.Equal(t,
-				gotTags, tt.wantTags,
+				tt.wantTags, gotTags,
 				"ParseMetricName() gotTags = %v, want %v", gotTags, tt.wantTags,
 			)
 		})

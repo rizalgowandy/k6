@@ -1,35 +1,15 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package html
 
 import (
 	neturl "net/url"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 )
 
 type FormValue struct {
 	Name  string
-	Value goja.Value
+	Value sobek.Value
 }
 
 func (s Selection) SerializeArray() []FormValue {
@@ -44,17 +24,18 @@ func (s Selection) SerializeArray() []FormValue {
 	formElements = formElements.FilterFunction(func(_ int, sel *goquery.Selection) bool {
 		name := sel.AttrOr("name", "")
 		inputType := sel.AttrOr("type", "")
-		disabled := sel.AttrOr("disabled", "")
-		checked := sel.AttrOr("checked", "")
+		// disabled and checked are boolean attributes, so only their presence matters
+		_, disabled := sel.Attr("disabled")
+		_, checked := sel.Attr("checked")
 
 		return name != "" && // Must have a non-empty name
-			disabled != "disabled" && // Must not be disabled
+			!disabled && // Must not be disabled
 			inputType != "submit" && // Must not be a button
 			inputType != "button" &&
 			inputType != "reset" &&
 			inputType != "image" && // Must not be an image or file
 			inputType != "file" &&
-			(checked == "checked" ||
+			(checked ||
 				(inputType != "checkbox" && inputType != "radio")) // Must be checked if it is an checkbox or radio
 	})
 
@@ -67,9 +48,9 @@ func (s Selection) SerializeArray() []FormValue {
 	return result
 }
 
-func (s Selection) SerializeObject() map[string]goja.Value {
+func (s Selection) SerializeObject() map[string]sobek.Value {
 	formValues := s.SerializeArray()
-	result := make(map[string]goja.Value)
+	result := make(map[string]sobek.Value)
 	for i := range formValues {
 		formValue := formValues[i]
 		result[formValue.Name] = formValue.Value

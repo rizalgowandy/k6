@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package v1
 
 import (
@@ -26,41 +6,34 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/core"
-	"go.k6.io/k6/core/local"
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/testutils"
-	"go.k6.io/k6/lib/testutils/minirunner"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/internal/lib/testutils/minirunner"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
 func TestGetMetrics(t *testing.T) {
 	t.Parallel()
 
-	logger := logrus.New()
-	logger.SetOutput(testutils.NewTestOutput(t))
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	testMetric, err := registry.NewMetric("my_metric", metrics.Trend, metrics.Time)
+	testState := getTestRunState(t, lib.Options{}, &minirunner.MiniRunner{})
+	testMetric, err := testState.Registry.NewMetric("my_metric", metrics.Trend, metrics.Time)
 	require.NoError(t, err)
-	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{}, builtinMetrics, logger)
-	require.NoError(t, err)
-	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, registry)
-	require.NoError(t, err)
+	cs := getControlSurface(t, testState)
 
-	engine.MetricsEngine.ObservedMetrics = map[string]*metrics.Metric{
+	cs.MetricsEngine.ObservedMetrics = map[string]*metrics.Metric{
 		"my_metric": testMetric,
 	}
-	engine.MetricsEngine.ObservedMetrics["my_metric"].Tainted = null.BoolFrom(true)
+	cs.MetricsEngine.ObservedMetrics["my_metric"].Tainted = null.BoolFrom(true)
 
 	rw := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/metrics", nil))
+	NewHandler(cs).ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/metrics", nil))
 	res := rw.Result()
+	t.Cleanup(func() {
+		assert.NoError(t, res.Body.Close())
+	})
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 
 	t.Run("document", func(t *testing.T) {
@@ -97,35 +70,32 @@ func TestGetMetrics(t *testing.T) {
 
 		resMetrics := envelop.Metrics()
 		assert.Len(t, resMetrics, 1)
-		assert.Equal(t, resMetrics[0].Name, "my_metric")
+		assert.Equal(t, "my_metric", resMetrics[0].Name)
 	})
 }
 
 func TestGetMetric(t *testing.T) {
 	t.Parallel()
 
-	logger := logrus.New()
-	logger.SetOutput(testutils.NewTestOutput(t))
-	registry := metrics.NewRegistry()
-	testMetric, err := registry.NewMetric("my_metric", metrics.Trend, metrics.Time)
+	testState := getTestRunState(t, lib.Options{}, &minirunner.MiniRunner{})
+	testMetric, err := testState.Registry.NewMetric("my_metric", metrics.Trend, metrics.Time)
 	require.NoError(t, err)
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{}, builtinMetrics, logger)
-	require.NoError(t, err)
-	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, registry)
-	require.NoError(t, err)
+	cs := getControlSurface(t, testState)
 
-	engine.MetricsEngine.ObservedMetrics = map[string]*metrics.Metric{
+	cs.MetricsEngine.ObservedMetrics = map[string]*metrics.Metric{
 		"my_metric": testMetric,
 	}
-	engine.MetricsEngine.ObservedMetrics["my_metric"].Tainted = null.BoolFrom(true)
+	cs.MetricsEngine.ObservedMetrics["my_metric"].Tainted = null.BoolFrom(true)
 
 	t.Run("nonexistent", func(t *testing.T) {
 		t.Parallel()
 
 		rw := httptest.NewRecorder()
-		NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/metrics/notreal", nil))
+		NewHandler(cs).ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/metrics/notreal", nil))
 		res := rw.Result()
+		t.Cleanup(func() {
+			assert.NoError(t, res.Body.Close())
+		})
 		assert.Equal(t, http.StatusNotFound, res.StatusCode)
 	})
 
@@ -133,8 +103,11 @@ func TestGetMetric(t *testing.T) {
 		t.Parallel()
 
 		rw := httptest.NewRecorder()
-		NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/metrics/my_metric", nil))
+		NewHandler(cs).ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/metrics/my_metric", nil))
 		res := rw.Result()
+		t.Cleanup(func() {
+			assert.NoError(t, res.Body.Close())
+		})
 		assert.Equal(t, http.StatusOK, res.StatusCode)
 
 		t.Run("document", func(t *testing.T) {
@@ -147,6 +120,8 @@ func TestGetMetric(t *testing.T) {
 		})
 
 		t.Run("metric", func(t *testing.T) {
+			t.Parallel()
+
 			var envelop metricJSONAPI
 
 			assert.NoError(t, json.Unmarshal(rw.Body.Bytes(), &envelop))

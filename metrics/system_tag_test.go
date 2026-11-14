@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
@@ -35,14 +15,14 @@ func TestSystemTagSetMarshalJSON(t *testing.T) {
 		tagset   SystemTagSet
 		expected string
 	}{
-		{TagIP, `["ip"]`},
-		{TagIP | TagProto | TagGroup, `["group","ip","proto"]`},
+		{SystemTagSet(TagIP), `["ip"]`},
+		{SystemTagSet(TagIP | TagProto | TagGroup), `["group","ip","proto"]`},
 		{0, `null`},
 	}
 
 	for _, tc := range tests {
-		ts := &tc.tagset
-		got, err := json.Marshal(ts)
+		ts := tc.tagset
+		got, err := json.Marshal(&ts)
 		require.Nil(t, err)
 		require.Equal(t, tc.expected, string(got))
 	}
@@ -53,10 +33,10 @@ func TestSystemTagSet_UnmarshalJSON(t *testing.T) {
 
 	tests := []struct {
 		tags []byte
-		sets []SystemTagSet
+		sets []SystemTag
 	}{
-		{[]byte(`[]`), []SystemTagSet{}},
-		{[]byte(`["ip", "proto"]`), []SystemTagSet{TagIP, TagProto}},
+		{[]byte(`[]`), []SystemTag{}},
+		{[]byte(`["ip", "proto"]`), []SystemTag{TagIP, TagProto}},
 	}
 
 	for _, tc := range tests {
@@ -71,7 +51,7 @@ func TestSystemTagSet_UnmarshalJSON(t *testing.T) {
 func TestSystemTagSetTextUnmarshal(t *testing.T) {
 	t.Parallel()
 
-	testMatrix := map[string]SystemTagSet{
+	testMatrix := map[string]SystemTag{
 		"":                      0,
 		"ip":                    TagIP,
 		"ip,proto":              TagIP | TagProto,
@@ -84,7 +64,7 @@ func TestSystemTagSetTextUnmarshal(t *testing.T) {
 		set := new(SystemTagSet)
 		err := set.UnmarshalText([]byte(input))
 		require.NoError(t, err)
-		require.Equal(t, expected, *set)
+		require.Equal(t, SystemTagSet(expected), *set)
 	}
 }
 
@@ -92,16 +72,16 @@ func TestTagSetMarshalJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		tagset   TagSet
+		tagset   EnabledTags
 		expected string
 	}{
-		{tagset: TagSet{"ip": true, "proto": true, "group": true, "custom": true}, expected: `["custom","group","ip","proto"]`},
-		{tagset: TagSet{}, expected: `[]`},
+		{tagset: EnabledTags{"ip": true, "proto": true, "group": true, "custom": true}, expected: `["custom","group","ip","proto"]`},
+		{tagset: EnabledTags{}, expected: `[]`},
 	}
 
 	for _, tc := range tests {
-		ts := &tc.tagset
-		got, err := json.Marshal(ts)
+		ts := tc.tagset
+		got, err := json.Marshal(&ts)
 		require.Nil(t, err)
 		require.Equal(t, tc.expected, string(got))
 	}
@@ -112,14 +92,14 @@ func TestTagSet_UnmarshalJSON(t *testing.T) {
 
 	tests := []struct {
 		tags []byte
-		sets TagSet
+		sets EnabledTags
 	}{
-		{[]byte(`[]`), TagSet{}},
-		{[]byte(`["ip","custom", "proto"]`), TagSet{"ip": true, "proto": true, "custom": true}},
+		{[]byte(`[]`), EnabledTags{}},
+		{[]byte(`["ip","custom", "proto"]`), EnabledTags{"ip": true, "proto": true, "custom": true}},
 	}
 
 	for _, tc := range tests {
-		ts := new(TagSet)
+		ts := new(EnabledTags)
 		require.Nil(t, json.Unmarshal(tc.tags, ts))
 		for tag := range tc.sets {
 			assert.True(t, (*ts)[tag])
@@ -130,8 +110,8 @@ func TestTagSet_UnmarshalJSON(t *testing.T) {
 func TestTagSetTextUnmarshal(t *testing.T) {
 	t.Parallel()
 
-	testMatrix := map[string]TagSet{
-		"":                           make(TagSet),
+	testMatrix := map[string]EnabledTags{
+		"":                           make(EnabledTags),
 		"ip":                         {"ip": true},
 		"ip,proto":                   {"ip": true, "proto": true},
 		"   ip  ,  proto  ":          {"ip": true, "proto": true},
@@ -141,7 +121,7 @@ func TestTagSetTextUnmarshal(t *testing.T) {
 	}
 
 	for input, expected := range testMatrix {
-		set := new(TagSet)
+		set := new(EnabledTags)
 		err := set.UnmarshalText([]byte(input))
 		require.NoError(t, err)
 		require.Equal(t, expected, *set)

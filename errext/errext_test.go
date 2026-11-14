@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package errext
 
 import (
@@ -27,20 +7,20 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.k6.io/k6/errext/exitcodes"
+	"go.k6.io/k6/v2/errext/exitcodes"
 )
 
 func assertHasHint(t *testing.T, err error, hint string) {
 	var typederr HasHint
 	require.ErrorAs(t, err, &typederr)
-	assert.Equal(t, typederr.Hint(), hint)
+	assert.Equal(t, hint, typederr.Hint())
 	assert.Contains(t, err.Error(), typederr.Error())
 }
 
 func assertHasExitCode(t *testing.T, err error, exitcode exitcodes.ExitCode) {
 	var typederr HasExitCode
 	require.ErrorAs(t, err, &typederr)
-	assert.Equal(t, typederr.ExitCode(), exitcode)
+	assert.Equal(t, exitcode, typederr.ExitCode())
 	assert.Contains(t, err.Error(), typederr.Error())
 }
 
@@ -72,7 +52,7 @@ func TestErrextHelpers(t *testing.T) {
 	assertHasHint(t, errBaseWithThreeHints, "best hint (better hint (test hint))")
 
 	finalErrorMess := fmt.Errorf("woot: %w", errBaseWithThreeHints)
-	assert.Equal(t, finalErrorMess.Error(), "woot: wrapper error: base error")
+	assert.Equal(t, "woot: wrapper error: base error", finalErrorMess.Error())
 	assertHasHint(t, finalErrorMess, "best hint (better hint (test hint))")
 	assertHasExitCode(t, finalErrorMess, testExitCode)
 }

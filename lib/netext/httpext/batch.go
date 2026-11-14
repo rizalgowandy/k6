@@ -1,30 +1,10 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
 	"context"
 	"sync/atomic"
 
-	"go.k6.io/k6/lib"
+	"go.k6.io/k6/v2/lib"
 )
 
 // BatchParsedHTTPRequest extends the normal parsed HTTP request with a pointer
@@ -42,18 +22,12 @@ type BatchParsedHTTPRequest struct {
 // pre-initialized. In addition, each processed request would emit either a nil
 // value, or an error, via the returned errors channel. The goroutines exit when
 // the requests channel is closed.
-// The processResponse callback can be used to modify the response, e.g.
-// to replace the body.
 func MakeBatchRequests(
 	ctx context.Context, state *lib.State,
 	requests []BatchParsedHTTPRequest,
 	reqCount, globalLimit, perHostLimit int,
-	processResponse func(*Response, ResponseType),
 ) <-chan error {
-	workers := globalLimit
-	if reqCount < workers {
-		workers = reqCount
-	}
+	workers := min(reqCount, globalLimit)
 	result := make(chan error, reqCount)
 	perHostLimiter := lib.NewMultiSlotLimiter(perHostLimit)
 
@@ -65,14 +39,13 @@ func MakeBatchRequests(
 
 		resp, err := MakeRequest(ctx, state, req.ParsedHTTPRequest)
 		if resp != nil {
-			processResponse(resp, req.ParsedHTTPRequest.ResponseType)
 			*req.Response = *resp
 		}
 		result <- err
 	}
 
-	counter, i32reqCount := int32(-1), int32(reqCount)
-	for i := 0; i < workers; i++ {
+	counter, i32reqCount := int32(-1), int32(reqCount) //nolint:gosec
+	for range workers {
 		go func() {
 			for {
 				reqNum := atomic.AddInt32(&counter, 1)

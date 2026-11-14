@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"go.k6.io/k6/js/modules"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/js/modules"
+	"go.k6.io/k6/v2/metrics"
 )
 
 func init() {
@@ -58,12 +58,11 @@ func (j *JSTest) Foo(arg float64) (bool, error) {
 
 	ctx := j.vu.Context()
 
-	tags := state.CloneTags()
-	tags["foo"] = "bar"
+	tags := state.Tags.GetCurrentValues().Tags.With("foo", "bar")
 	metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-		Time:   time.Now(),
-		Metric: j.foos, Tags: metrics.IntoSampleTags(&tags),
-		Value: arg,
+		Time:       time.Now(),
+		TimeSeries: metrics.TimeSeries{Metric: j.foos, Tags: tags},
+		Value:      arg,
 	})
 
 	return true, nil

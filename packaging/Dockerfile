@@ -1,24 +1,20 @@
-FROM debian:buster-20210311
+FROM debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
 
 LABEL maintainer="k6 Developers <developers@k6.io>"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
-    apt-get install -y apt-utils createrepo curl git gnupg2 python3-pip unzip
+    apt-get install -y apt-utils bzip2 createrepo-c curl git gnupg2 s3cmd unzip rpm
 
-ARG S3CMD_VERSION
-RUN pip3 install "s3cmd${S3CMD_VERSION:+==$S3CMD_VERSION}"
-
-COPY ./awscli-key.gpg .
-ARG AWSCLI_VERSION
 # Download awscli, check GPG signature and install.
+COPY ./awscli-key.gpg .
 RUN export GNUPGHOME="$(mktemp -d)" && \
     gpg2 --import ./awscli-key.gpg && \
     fpr="$(gpg2 --with-colons --fingerprint aws-cli | grep '^fpr' | cut -d: -f10)" && \
     gpg2 --export-ownertrust && echo "${fpr}:6:" | gpg2 --import-ownertrust && \
     curl -fsSL --remote-name-all \
-      "https://awscli.amazonaws.com/awscli-exe-linux-x86_64${AWSCLI_VERSION:+-$AWSCLI_VERSION}.zip"{,.sig} && \
+      "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.26.5.zip"{,.sig} && \
     gpg2 --verify awscli*.sig awscli*.zip && \
     unzip -q awscli*.zip && \
     ./aws/install && \

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2018 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -27,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/metrics"
 	"gopkg.in/guregu/null.v3"
 )
 
@@ -55,23 +35,89 @@ type Trail struct {
 
 	Failed null.Bool
 	// Populated by SaveSamples()
-	Tags    *metrics.SampleTags
-	Samples []metrics.Sample
+	Tags     *metrics.TagSet
+	Metadata map[string]string
+	Samples  []metrics.Sample
 }
 
-// SaveSamples populates the Trail's sample slice so they're accesible via GetSamples()
-func (tr *Trail) SaveSamples(builtinMetrics *metrics.BuiltinMetrics, tags *metrics.SampleTags) {
-	tr.Tags = tags
+// SaveSamples populates the Trail's sample slice so they're accessible via GetSamples()
+func (tr *Trail) SaveSamples(builtinMetrics *metrics.BuiltinMetrics, ctm *metrics.TagsAndMeta) {
+	tr.Tags = ctm.Tags
+	tr.Metadata = ctm.Metadata
 	tr.Samples = make([]metrics.Sample, 0, 9) // this is with 1 more for a possible HTTPReqFailed
 	tr.Samples = append(tr.Samples, []metrics.Sample{
-		{Metric: builtinMetrics.HTTPReqs, Time: tr.EndTime, Tags: tags, Value: 1},
-		{Metric: builtinMetrics.HTTPReqDuration, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.Duration)},
-		{Metric: builtinMetrics.HTTPReqBlocked, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.Blocked)},
-		{Metric: builtinMetrics.HTTPReqConnecting, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.Connecting)},
-		{Metric: builtinMetrics.HTTPReqTLSHandshaking, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.TLSHandshaking)},
-		{Metric: builtinMetrics.HTTPReqSending, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.Sending)},
-		{Metric: builtinMetrics.HTTPReqWaiting, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.Waiting)},
-		{Metric: builtinMetrics.HTTPReqReceiving, Time: tr.EndTime, Tags: tags, Value: metrics.D(tr.Receiving)},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqs,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    1,
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqDuration,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.Duration),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqBlocked,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.Blocked),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqConnecting,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.Connecting),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqTLSHandshaking,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.TLSHandshaking),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqSending,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.Sending),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqWaiting,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.Waiting),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.HTTPReqReceiving,
+				Tags:   ctm.Tags,
+			},
+			Time:     tr.EndTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(tr.Receiving),
+		},
 	}...)
 }
 
@@ -81,7 +127,7 @@ func (tr *Trail) GetSamples() []metrics.Sample {
 }
 
 // GetTags implements the metrics.ConnectedSampleContainer interface.
-func (tr *Trail) GetTags() *metrics.SampleTags {
+func (tr *Trail) GetTags() *metrics.TagSet {
 	return tr.Tags
 }
 
@@ -138,17 +184,17 @@ func now() int64 {
 // Keep in mind that GetConn won't be called if a connection
 // is reused though, for example when there's a redirect.
 // If it's called, it will be called before all other hooks.
-func (t *Tracer) GetConn(hostPort string) {
+func (t *Tracer) GetConn(_ string) {
 	t.getConn = now()
 }
 
 // ConnectStart is called when a new connection's Dial begins.
 // If net.Dialer.DualStack (IPv6 "Happy Eyeballs") support is
-// enabled, this may be called multiple times.
+// enabled (default), this may be called multiple times.
 //
 // If the connection is reused, this won't be called. Otherwise,
 // it will be called after GetConn() and before ConnectDone().
-func (t *Tracer) ConnectStart(network, addr string) {
+func (t *Tracer) ConnectStart(_, _ string) {
 	// If using dual-stack dialing, it's possible to get this
 	// multiple times, so the atomic compareAndSwap ensures
 	// that only the first call's time is recorded
@@ -157,14 +203,14 @@ func (t *Tracer) ConnectStart(network, addr string) {
 
 // ConnectDone is called when a new connection's Dial
 // completes. The provided err indicates whether the
-// connection completedly successfully.
+// connection completed successfully.
 // If net.Dialer.DualStack ("Happy Eyeballs") support is
-// enabled, this may be called multiple times.
+// enabled (default), this may be called multiple times.
 //
 // If the connection is reused, this won't be called. Otherwise,
 // it will be called after ConnectStart() and before either
 // TLSHandshakeStart() (for TLS connections) or GotConn().
-func (t *Tracer) ConnectDone(network, addr string, err error) {
+func (t *Tracer) ConnectDone(_, _ string, err error) {
 	// If using dual-stack dialing, it's possible to get this
 	// multiple times, so the atomic compareAndSwap ensures
 	// that only the first call's time is recorded
@@ -193,7 +239,7 @@ func (t *Tracer) TLSHandshakeStart() {
 // it will be called after TLSHandshakeStart() and before GotConn().
 // If the request was cancelled, this could be called after the
 // RoundTrip() method has returned.
-func (t *Tracer) TLSHandshakeDone(state tls.ConnectionState, err error) {
+func (t *Tracer) TLSHandshakeDone(_ tls.ConnectionState, err error) {
 	if err == nil {
 		atomic.CompareAndSwapInt64(&t.tlsHandshakeDone, 0, now())
 	}
@@ -297,20 +343,12 @@ func (t *Tracer) Done() *Trail {
 	if tlsHandshakeDone != 0 && tlsHandshakeStart != 0 {
 		trail.TLSHandshaking = time.Duration(tlsHandshakeDone - tlsHandshakeStart)
 	}
+	// Sending starts once the connection is obtained, whether it is plain, TLS,
+	// reused, or tunneled through an HTTPS proxy.
+	if gotConn != 0 && wroteRequest > gotConn {
+		trail.Sending = time.Duration(wroteRequest - gotConn)
+	}
 	if wroteRequest != 0 {
-		if tlsHandshakeDone != 0 {
-			// If the request was sent over TLS, we need to use
-			// TLS Handshake Done time to calculate sending duration
-			trail.Sending = time.Duration(wroteRequest - tlsHandshakeDone)
-		} else if connectDone != 0 {
-			// Otherwise, use the end of the normal connection
-			trail.Sending = time.Duration(wroteRequest - connectDone)
-		} else {
-			// Finally, this handles the strange HTTP/2 case where the GotConn() hook
-			// gets called first, but with Reused=false
-			trail.Sending = time.Duration(wroteRequest - gotConn)
-		}
-
 		if gotFirstResponseByte != 0 {
 			// We started receiving at least some response back
 

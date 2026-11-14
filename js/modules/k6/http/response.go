@@ -1,47 +1,28 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/tidwall/gjson"
 
-	"go.k6.io/k6/js/common"
-	"go.k6.io/k6/js/modules/k6/html"
-	"go.k6.io/k6/lib/netext/httpext"
+	"go.k6.io/k6/v2/js/common"
+	"go.k6.io/k6/v2/js/modules/k6/html"
+	"go.k6.io/k6/v2/lib/netext/httpext"
 )
 
-// Response is a representation of an HTTP response to be returned to the goja VM
+// Response is a representation of an HTTP response to be returned to the Sobek VM
 type Response struct {
 	*httpext.Response `js:"-"`
 	client            *Client
 
-	cachedJSON    interface{}
+	cachedJSON    any
 	validatedJSON bool
 }
 
@@ -81,8 +62,8 @@ func (res *Response) HTML(selector ...string) html.Selection {
 	return sel
 }
 
-// JSON parses the body of a response as JSON and returns it to the goja VM.
-func (res *Response) JSON(selector ...string) goja.Value {
+// JSON parses the body of a response as JSON and returns it to the Sobek VM.
+func (res *Response) JSON(selector ...string) sobek.Value {
 	rt := res.client.moduleInstance.vu.Runtime()
 
 	if res.Body == nil {
@@ -93,7 +74,7 @@ func (res *Response) JSON(selector ...string) goja.Value {
 
 	hasSelector := len(selector) > 0
 	if res.cachedJSON == nil || hasSelector { //nolint:nestif
-		var v interface{}
+		var v any
 
 		body, err := common.ToBytes(res.Body)
 		if err != nil {
@@ -103,7 +84,7 @@ func (res *Response) JSON(selector ...string) goja.Value {
 		if hasSelector {
 			if !res.validatedJSON {
 				if !gjson.ValidBytes(body) {
-					return goja.Undefined()
+					return sobek.Undefined()
 				}
 				res.validatedJSON = true
 			}
@@ -111,14 +92,13 @@ func (res *Response) JSON(selector ...string) goja.Value {
 			result := gjson.GetBytes(body, selector[0])
 
 			if !result.Exists() {
-				return goja.Undefined()
+				return sobek.Undefined()
 			}
 			return rt.ToValue(result.Value())
 		}
 
 		if err := json.Unmarshal(body, &v); err != nil {
-			var syntaxError *json.SyntaxError
-			if errors.As(err, &syntaxError) {
+			if syntaxError, ok := errors.AsType[*json.SyntaxError](err); ok {
 				err = checkErrorInJSON(body, int(syntaxError.Offset), err)
 			}
 			common.Throw(rt, err)
@@ -138,13 +118,23 @@ func checkErrorInJSON(input []byte, offset int, err error) error {
 	line := 1
 	character := 0
 
+	// SyntaxError.Offset is the number of bytes read (1-based).
+	if offset > 0 {
+		offset--
+	}
+
 	for i, b := range str {
 		if b == lf {
 			line++
 			character = 0
+		} else {
+			character++
 		}
-		character++
-		if i == offset {
+
+		if i >= offset {
+			if b == lf {
+				character = 1
+			}
 			break
 		}
 	}
@@ -154,13 +144,13 @@ func checkErrorInJSON(input []byte, offset int, err error) error {
 
 // SubmitForm parses the body as an html looking for a from and then submitting it
 // TODO: document the actual arguments that can be provided
-func (res *Response) SubmitForm(args ...goja.Value) (*Response, error) {
+func (res *Response) SubmitForm(args ...sobek.Value) (*Response, error) {
 	rt := res.client.moduleInstance.vu.Runtime()
 
 	formSelector := "form"
 	submitSelector := "[type=\"submit\"]"
-	var fields map[string]goja.Value
-	requestParams := goja.Null()
+	var fields map[string]sobek.Value
+	requestParams := sobek.Null()
 	if len(args) > 0 {
 		params := args[0].ToObject(rt)
 		for _, k := range params.Keys() {
@@ -186,7 +176,7 @@ func (res *Response) SubmitForm(args ...goja.Value) (*Response, error) {
 
 	methodAttr := form.Attr("method")
 	var requestMethod string
-	if methodAttr == goja.Undefined() {
+	if methodAttr == sobek.Undefined() {
 		// Use GET by default
 		requestMethod = http.MethodGet
 	} else {
@@ -200,7 +190,7 @@ func (res *Response) SubmitForm(args ...goja.Value) (*Response, error) {
 
 	actionAttr := form.Attr("action")
 	var requestURL *url.URL
-	if actionAttr == goja.Undefined() {
+	if actionAttr == sobek.Undefined() {
 		// Use the url of the response if no action is set
 		requestURL = responseURL
 	} else {
@@ -218,14 +208,12 @@ func (res *Response) SubmitForm(args ...goja.Value) (*Response, error) {
 	submit := form.Find(submitSelector)
 	submitName := submit.Attr("name")
 	submitValue := submit.Val()
-	if submitName != goja.Undefined() && submitValue != goja.Undefined() {
+	if submitName != sobek.Undefined() && submitValue != sobek.Undefined() {
 		values[submitName.String()] = submitValue
 	}
 
 	// Set the values supplied in the arguments, overriding automatically set values
-	for k, v := range fields {
-		values[k] = v
-	}
+	maps.Copy(values, fields)
 
 	if requestMethod == http.MethodGet {
 		q := url.Values{}
@@ -233,7 +221,7 @@ func (res *Response) SubmitForm(args ...goja.Value) (*Response, error) {
 			q.Add(k, v.String())
 		}
 		requestURL.RawQuery = q.Encode()
-		return res.client.Request(requestMethod, rt.ToValue(requestURL.String()), goja.Null(), requestParams)
+		return res.client.Request(requestMethod, rt.ToValue(requestURL.String()), sobek.Null(), requestParams)
 	}
 	return res.client.Request(
 		requestMethod, rt.ToValue(requestURL.String()),
@@ -243,11 +231,11 @@ func (res *Response) SubmitForm(args ...goja.Value) (*Response, error) {
 
 // ClickLink parses the body as an html, looks for a link and than makes a request as if the link was
 // clicked
-func (res *Response) ClickLink(args ...goja.Value) (*Response, error) {
+func (res *Response) ClickLink(args ...sobek.Value) (*Response, error) {
 	rt := res.client.moduleInstance.vu.Runtime()
 
 	selector := "a[href]"
-	requestParams := goja.Null()
+	requestParams := sobek.Null()
 	if len(args) > 0 {
 		params := args[0].ToObject(rt)
 		for _, k := range params.Keys() {
@@ -270,8 +258,9 @@ func (res *Response) ClickLink(args ...goja.Value) (*Response, error) {
 		common.Throw(rt, fmt.Errorf("no element found for selector '%s' in response '%s'", selector, res.URL))
 	}
 	hrefAttr := link.Attr("href")
-	if hrefAttr == goja.Undefined() {
-		common.Throw(rt, fmt.Errorf("no valid href attribute value found on element '%s' in response '%s'", selector, res.URL))
+	if hrefAttr == sobek.Undefined() {
+		errmsg := fmt.Errorf("no valid href attribute value found on element '%s' in response '%s'", selector, res.URL)
+		common.Throw(rt, errmsg)
 	}
 	hrefURL, err := url.Parse(hrefAttr.String())
 	if err != nil {
@@ -279,5 +268,5 @@ func (res *Response) ClickLink(args ...goja.Value) (*Response, error) {
 	}
 	requestURL := responseURL.ResolveReference(hrefURL)
 
-	return res.client.Request(http.MethodGet, rt.ToValue(requestURL.String()), goja.Undefined(), requestParams)
+	return res.client.Request(http.MethodGet, rt.ToValue(requestURL.String()), sobek.Undefined(), requestParams)
 }

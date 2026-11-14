@@ -1,22 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
 package metrics
 
 import (
@@ -27,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"go.k6.io/k6/errext"
-	"go.k6.io/k6/errext/exitcodes"
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/errext"
+	"go.k6.io/k6/v2/errext/exitcodes"
+	"go.k6.io/k6/v2/lib/types"
 )
 
 // Threshold is a representation of a single threshold for a single metric
@@ -124,7 +105,7 @@ func (tc *thresholdConfig) UnmarshalJSON(data []byte) error {
 }
 
 func (tc thresholdConfig) MarshalJSON() ([]byte, error) {
-	var data interface{} = tc.Threshold
+	var data any = tc.Threshold
 	if tc.AbortOnFail {
 		data = rawThresholdConfig(tc)
 	}
@@ -200,14 +181,18 @@ func (ts *Thresholds) Run(sink Sink, duration time.Duration) (bool, error) {
 	switch sinkImpl := sink.(type) {
 	case *CounterSink:
 		ts.sinked["count"] = sinkImpl.Value
-		ts.sinked["rate"] = sinkImpl.Value / (float64(duration) / float64(time.Second))
+		// Guard against a zero duration, matching CounterSink.Rate, so the rate
+		// does not become +Inf and make a "rate" threshold spuriously fail.
+		if duration > 0 {
+			ts.sinked["rate"] = sinkImpl.Value / (float64(duration) / float64(time.Second))
+		}
 	case *GaugeSink:
 		ts.sinked["value"] = sinkImpl.Value
 	case *TrendSink:
-		ts.sinked["min"] = sinkImpl.Min
-		ts.sinked["max"] = sinkImpl.Max
-		ts.sinked["avg"] = sinkImpl.Avg
-		ts.sinked["med"] = sinkImpl.Med
+		ts.sinked["min"] = sinkImpl.Min()
+		ts.sinked["max"] = sinkImpl.Max()
+		ts.sinked["avg"] = sinkImpl.Avg()
+		ts.sinked["med"] = sinkImpl.P(0.5)
 
 		// Parse the percentile thresholds and insert them in
 		// the sinks mapping.
@@ -224,10 +209,6 @@ func (ts *Thresholds) Run(sink Sink, duration time.Duration) (bool, error) {
 		// would lead to [#2520](https://github.com/grafana/k6/issues/2520)
 		if sinkImpl.Total > 0 {
 			ts.sinked["rate"] = float64(sinkImpl.Trues) / float64(sinkImpl.Total)
-		}
-	case DummySink:
-		for k, v := range sinkImpl {
-			ts.sinked[k] = v
 		}
 	default:
 		return false, fmt.Errorf("unable to run Thresholds; reason: unknown sink type")
@@ -334,7 +315,7 @@ func (ts Thresholds) MarshalJSON() ([]byte, error) {
 
 // MarshalJSONWithoutHTMLEscape marshals t to JSON without escaping characters
 // for safe use in HTML.
-func MarshalJSONWithoutHTMLEscape(t interface{}) ([]byte, error) {
+func MarshalJSONWithoutHTMLEscape(t any) ([]byte, error) {
 	buffer := &bytes.Buffer{}
 	encoder := json.NewEncoder(buffer)
 	encoder.SetEscapeHTML(false)

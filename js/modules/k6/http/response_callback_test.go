@@ -1,40 +1,23 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
 func TestExpectedStatuses(t *testing.T) {
 	t.Parallel()
-	rt, _ := getTestModuleInstance(t, nil, nil)
+	runtime, _ := getTestModuleInstance(t)
+	rt := runtime.VU.RuntimeField
 
 	cases := map[string]struct {
 		code, err string
@@ -75,7 +58,6 @@ func TestExpectedStatuses(t *testing.T) {
 	}
 
 	for name, testCase := range cases {
-		name, testCase := name, testCase
 		t.Run(name, func(t *testing.T) {
 			val, err := rt.RunString(testCase.code)
 			if testCase.err == "" {
@@ -88,8 +70,9 @@ func TestExpectedStatuses(t *testing.T) {
 			}
 
 			require.Error(t, err)
-			exc := err.(*goja.Exception)
-			require.Contains(t, exc.Error(), testCase.err)
+			var exc *sobek.Exception
+			errors.As(err, &exc)
+			require.ErrorContains(t, exc, testCase.err)
 		})
 	}
 }
@@ -101,7 +84,10 @@ type expectedSample struct {
 
 func TestResponseCallbackInAction(t *testing.T) {
 	t.Parallel()
-	tb, _, samples, rt, mii := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+
 	sr := tb.Replacer.Replace
 
 	HTTPMetricsWithoutFailed := []string{
@@ -115,7 +101,7 @@ func TestResponseCallbackInAction(t *testing.T) {
 		metrics.HTTPReqTLSHandshakingName,
 	}
 
-	allHTTPMetrics := append(HTTPMetricsWithoutFailed, metrics.HTTPReqFailedName)
+	allHTTPMetrics := append(HTTPMetricsWithoutFailed, metrics.HTTPReqFailedName) //nolint: gocritic
 
 	testCases := map[string]struct {
 		code            string
@@ -153,7 +139,7 @@ func TestResponseCallbackInAction(t *testing.T) {
 		"overwrite per request": {
 			code: `
 			http.setResponseCallback(http.expectedStatuses(200));
-			res = http.request("GET", "HTTPBIN_URL/redirect/1");
+			http.request("GET", "HTTPBIN_URL/redirect/1");
 			`,
 			expectedSamples: []expectedSample{
 				{
@@ -242,7 +228,7 @@ func TestResponseCallbackInAction(t *testing.T) {
 		"global overwrite with null": {
 			code: `
 			http.setResponseCallback(null);
-			res = http.request("GET", "HTTPBIN_URL/redirect/1");
+			http.request("GET", "HTTPBIN_URL/redirect/1");
 			`,
 			expectedSamples: []expectedSample{
 				{
@@ -271,11 +257,11 @@ func TestResponseCallbackInAction(t *testing.T) {
 		},
 	}
 	for name, testCase := range testCases {
-		testCase := testCase
-		t.Run(name, func(t *testing.T) {
-			mii.defaultClient.responseCallback = defaultExpectedStatuses.match
+		runCode := func(code string) {
+			t.Helper()
+			ts.instance.defaultClient.responseCallback = defaultExpectedStatuses.match
 
-			_, err := rt.RunString(sr(testCase.code))
+			_, err := ts.runtime.RunOnEventLoop(sr(code))
 			assert.NoError(t, err)
 			bufSamples := metrics.GetBufferedSamples(samples)
 
@@ -293,13 +279,23 @@ func TestResponseCallbackInAction(t *testing.T) {
 			for i, expectedSample := range testCase.expectedSamples {
 				assertRequestMetricsEmittedSingle(t, bufSamples[i], expectedSample.tags, expectedSample.metrics, nil)
 			}
+		}
+		t.Run(name, func(_ *testing.T) {
+			runCode(testCase.code)
+		})
+		t.Run("async_"+name, func(_ *testing.T) {
+			runCode(strings.ReplaceAll(testCase.code, "http.request", "http.asyncRequest"))
 		})
 	}
 }
 
 func TestResponseCallbackBatch(t *testing.T) {
 	t.Parallel()
-	tb, _, samples, rt, mii := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+
 	sr := tb.Replacer.Replace
 
 	HTTPMetricsWithoutFailed := []string{
@@ -313,7 +309,7 @@ func TestResponseCallbackBatch(t *testing.T) {
 		metrics.HTTPReqTLSHandshakingName,
 	}
 
-	allHTTPMetrics := append(HTTPMetricsWithoutFailed, metrics.HTTPReqFailedName)
+	allHTTPMetrics := append(HTTPMetricsWithoutFailed, metrics.HTTPReqFailedName) //nolint:gocritic
 	// IMPORTANT: the tests here depend on the fact that the url they hit can be ordered in the same
 	// order as the expectedSamples even if they are made concurrently
 	testCases := map[string]struct {
@@ -380,9 +376,8 @@ func TestResponseCallbackBatch(t *testing.T) {
 		},
 	}
 	for name, testCase := range testCases {
-		testCase := testCase
 		t.Run(name, func(t *testing.T) {
-			mii.defaultClient.responseCallback = defaultExpectedStatuses.match
+			ts.instance.defaultClient.responseCallback = defaultExpectedStatuses.match
 
 			_, err := rt.RunString(sr(testCase.code))
 			assert.NoError(t, err)
@@ -413,7 +408,11 @@ func TestResponseCallbackBatch(t *testing.T) {
 
 func TestResponseCallbackInActionWithoutPassedTag(t *testing.T) {
 	t.Parallel()
-	tb, state, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 	sr := tb.Replacer.Replace
 	allHTTPMetrics := []string{
 		metrics.HTTPReqsName,
@@ -453,7 +452,7 @@ func TestResponseCallbackInActionWithoutPassedTag(t *testing.T) {
 	}
 	assertRequestMetricsEmittedSingle(t, bufSamples[0], tags, allHTTPMetrics, func(sample metrics.Sample) {
 		if sample.Metric.Name == metrics.HTTPReqFailedName {
-			require.EqualValues(t, sample.Value, 1)
+			require.EqualValues(t, 1, sample.Value)
 		}
 	})
 	tags["url"] = sr("HTTPBIN_URL/get")
@@ -461,14 +460,17 @@ func TestResponseCallbackInActionWithoutPassedTag(t *testing.T) {
 	tags["status"] = "200"
 	assertRequestMetricsEmittedSingle(t, bufSamples[1], tags, allHTTPMetrics, func(sample metrics.Sample) {
 		if sample.Metric.Name == metrics.HTTPReqFailedName {
-			require.EqualValues(t, sample.Value, 0)
+			require.EqualValues(t, 0, sample.Value)
 		}
 	})
 }
 
 func TestDigestWithResponseCallback(t *testing.T) {
 	t.Parallel()
-	tb, _, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
 
 	urlWithCreds := tb.Replacer.Replace(
 		"http://testuser:testpwd@HTTPBIN_IP:HTTPBIN_PORT/digest-auth/auth/testuser/testpwd",
@@ -519,14 +521,14 @@ func TestDigestWithResponseCallback(t *testing.T) {
 	}
 	assertRequestMetricsEmittedSingle(t, bufSamples[0], tags, allHTTPMetrics, func(sample metrics.Sample) {
 		if sample.Metric.Name == metrics.HTTPReqFailedName {
-			require.EqualValues(t, sample.Value, 0)
+			require.EqualValues(t, 0, sample.Value)
 		}
 	})
 	tags["status"] = "200"
 	delete(tags, "error_code")
 	assertRequestMetricsEmittedSingle(t, bufSamples[1], tags, allHTTPMetrics, func(sample metrics.Sample) {
 		if sample.Metric.Name == metrics.HTTPReqFailedName {
-			require.EqualValues(t, sample.Value, 0)
+			require.EqualValues(t, 0, sample.Value)
 		}
 	})
 }

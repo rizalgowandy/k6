@@ -1,27 +1,8 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -29,7 +10,7 @@ import (
 )
 
 // thresholdExpression holds the parsed result of a threshold expression,
-// as described in: https://k6.io/docs/using-k6/thresholds/#threshold-syntax
+// as described in: https://grafana.com/docs/k6/latest/using-k6/thresholds/#threshold-syntax
 type thresholdExpression struct {
 	// AggregationMethod holds the aggregation method parsed
 	// from the threshold expression. Possible values are described
@@ -69,7 +50,7 @@ func (te *thresholdExpression) SinkKey() string {
 	return te.AggregationMethod
 }
 
-// parseThresholdAssertion parses a threshold condition expression,
+// parseThresholdExpression parses a threshold condition expression,
 // as defined in a JS script (for instance p(95)<1000), into a thresholdExpression
 // instance.
 //
@@ -144,7 +125,7 @@ const (
 // the smallest common substring, the actual slice order matters.
 // Longer tokens with symbols in common with shorter ones must appear
 // first in the list in order to be effectively matched.
-var operatorTokens = [7]string{ // nolint:gochecknoglobals
+var operatorTokens = [7]string{ //nolint:gochecknoglobals
 	tokenLessEqual,
 	tokenLess,
 	tokenGreaterEqual,
@@ -162,9 +143,9 @@ var operatorTokens = [7]string{ // nolint:gochecknoglobals
 // their spaces.
 func scanThresholdExpression(input string) (string, string, string, error) {
 	for _, op := range operatorTokens {
-		substrings := strings.SplitN(input, op, 2)
-		if len(substrings) == 2 {
-			return strings.TrimSpace(substrings[0]), op, strings.TrimSpace(substrings[1]), nil
+		left, right, _ := strings.Cut(input, op)
+		if right != "" {
+			return strings.TrimSpace(left), op, strings.TrimSpace(right), nil
 		}
 	}
 
@@ -190,7 +171,7 @@ const (
 // It is meant to be used during the parsing of threshold expressions.
 // Although declared as a `var`, being an array, it is effectively
 // immutable and can be considered constant.
-var aggregationMethodTokens = [8]string{ // nolint:gochecknoglobals
+var aggregationMethodTokens = [8]string{ //nolint:gochecknoglobals
 	tokenValue,
 	tokenCount,
 	tokenRate,
@@ -201,7 +182,7 @@ var aggregationMethodTokens = [8]string{ // nolint:gochecknoglobals
 	tokenPercentile,
 }
 
-// parseThresholdMethod will parse a threshold condition expression's method.
+// parseThresholdAggregationMethod will parse a threshold condition expression's method.
 // It assumes the provided input argument is already trimmed and cleaned up.
 // If it encounters a percentile method, it will parse it and verify it
 // boils down to an expression of the form: `p(float64)`, but will return
@@ -221,6 +202,9 @@ func parseThresholdAggregationMethod(input string) (string, null.Float, error) {
 		aggregationValue, err := strconv.ParseFloat(trimDelimited("p(", input, ")"), 64)
 		if err != nil {
 			return "", null.Float{}, fmt.Errorf("malformed percentile value; reason: %w", err)
+		}
+		if math.IsNaN(aggregationValue) || aggregationValue < 0 || aggregationValue > 100 {
+			return "", null.Float{}, fmt.Errorf("malformed percentile value, provide a number between 0 and 100")
 		}
 
 		return tokenPercentile, null.FloatFrom(aggregationValue), nil

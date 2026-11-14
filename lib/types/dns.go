@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package types
 
 import (
@@ -53,6 +33,7 @@ func DefaultDNSConfig() DNSConfig {
 }
 
 // DNSPolicy specifies the preference for handling IP versions in DNS resolutions.
+//
 //go:generate enumer -type=DNSPolicy -trimprefix DNS -output dns_policy_gen.go
 type DNSPolicy uint8
 
@@ -122,6 +103,7 @@ func (d NullDNSPolicy) MarshalJSON() ([]byte, error) {
 
 // DNSSelect is the strategy to use when picking a single IP if more than one
 // is returned for a host name.
+//
 //go:generate enumer -type=DNSSelect -trimprefix DNS -output dns_select_gen.go
 type DNSSelect uint8
 
@@ -216,11 +198,11 @@ func (c *DNSConfig) UnmarshalText(text []byte) error {
 	values := strings.Split(string(text), ",")
 	params := make(map[string]string, len(values))
 	for _, value := range values {
-		args := strings.SplitN(value, "=", 2)
-		if len(args) != 2 {
+		k, v, _ := strings.Cut(value, "=")
+		if v == "" {
 			return fmt.Errorf("no value for key %s", value)
 		}
-		params[args[0]] = args[1]
+		params[k] = v
 	}
 	return c.unmarshal(params)
 }

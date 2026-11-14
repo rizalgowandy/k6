@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
@@ -31,11 +11,12 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/ui/pb"
+	"go.k6.io/k6/v2/internal/ui/pb"
+	"go.k6.io/k6/v2/metrics"
 )
 
 // TODO: remove globals and use some type of explicit dependency injection?
+//
 //nolint:gochecknoglobals
 var (
 	executorConfigTypesMutex   sync.RWMutex
@@ -74,6 +55,8 @@ type ExecutionStep struct {
 // TODO: make []ExecutionStep or []ExecutorConfig their own type?
 
 // ExecutorConfig is an interface that should be implemented by all executor config types
+//
+//nolint:interfacebloat // We don't have plan to split it.
 type ExecutorConfig interface {
 	Validate() []error
 
@@ -99,6 +82,7 @@ type ExecutorConfig interface {
 	// execution, including any extensions caused by waiting for iterations to
 	// finish with graceful stops or ramp-downs.
 	GetExecutionRequirements(*ExecutionTuple) []ExecutionStep
+	GetScenarioOptions() *ScenarioOptions
 
 	// Return a human-readable description of the executor
 	GetDescription(*ExecutionTuple) string
@@ -107,6 +91,12 @@ type ExecutorConfig interface {
 
 	// HasWork reports whether there is any work for the executor to do with a given segment.
 	HasWork(*ExecutionTuple) bool
+}
+
+// ScenarioOptions are options specific to a scenario. These include k6 browser
+// options, which are validated by the browser module, and not by k6 core.
+type ScenarioOptions struct {
+	Browser map[string]any `json:"browser"`
 }
 
 // ScenarioState holds runtime scenario information returned by the k6/execution
@@ -142,7 +132,7 @@ type PausableExecutor interface {
 // configuration can be modified in the middle of the test execution. Currently,
 // only the manual execution executor implements it.
 type LiveUpdatableExecutor interface {
-	UpdateConfig(ctx context.Context, newConfig interface{}) error
+	UpdateConfig(ctx context.Context, newConfig any) error
 }
 
 // ExecutorConfigConstructor is a simple function that returns a concrete

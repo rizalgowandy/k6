@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 // Package output contains the interfaces that k6 outputs (and output
 // extensions) have to implement, as well as some helpers to make their
 // implementation and management easier.
@@ -29,10 +9,12 @@ import (
 	"net/url"
 
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/internal/features"
+	"go.k6.io/k6/v2/internal/usage"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/lib/fsext"
+	"go.k6.io/k6/v2/metrics"
 )
 
 // Params contains all possible constructor parameters an output may need.
@@ -45,11 +27,16 @@ type Params struct {
 	Environment    map[string]string
 	StdOut         io.Writer
 	StdErr         io.Writer
-	FS             afero.Fs
+	FS             fsext.Fs
 	ScriptPath     *url.URL
 	ScriptOptions  lib.Options
 	RuntimeOptions lib.RuntimeOptions
 	ExecutionPlan  []lib.ExecutionStep
+	Usage          *usage.Usage
+
+	// Features is the resolved feature-flag activation set for the run, so
+	// outputs can gate behavior on a typed flag (e.g. native histograms).
+	Features *features.Flags
 }
 
 // TODO: make v2 with buffered channels?
@@ -86,19 +73,33 @@ type WithThresholds interface {
 	SetThresholds(map[string]metrics.Thresholds)
 }
 
-// WithTestRunStop is an output that can stop the Engine mid-test, interrupting
-// the whole test run execution if some internal condition occurs, completely
-// independently from the thresholds. It requires a callback function which
-// expects an error and triggers the Engine to stop.
+// WithArchive is an output that can receive the archive object in order
+// to upload it to the cloud.
+type WithArchive interface {
+	Output
+	SetArchive(archive *lib.Archive)
+}
+
+// WithTestRunStop is an output that can stop the test run mid-way through,
+// interrupting the whole test run execution if some internal condition occurs,
+// completely independently from the thresholds. It requires a callback function
+// which expects an error and triggers the Engine to stop.
 type WithTestRunStop interface {
 	Output
 	SetTestRunStopCallback(func(error))
 }
 
-// WithRunStatusUpdates means the output can receive test run status updates.
-type WithRunStatusUpdates interface {
+// WithStopWithTestError allows output to receive the error value that the test
+// finished with. It could be nil, if the test finished normally.
+//
+// If this interface is implemented by the output, StopWithError() will be
+// called instead of Stop().
+//
+// TODO: refactor the main interface to use this method instead of Stop()? Or
+// something else along the lines of https://github.com/grafana/k6/issues/2430 ?
+type WithStopWithTestError interface {
 	Output
-	SetRunStatus(latestStatus lib.RunStatus)
+	StopWithTestError(testRunErr error) error // nil testRunErr means error-free test run
 }
 
 // WithBuiltinMetrics means the output can receive the builtin metrics.

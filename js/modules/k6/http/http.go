@@ -1,34 +1,14 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
 	"net/http"
 	"net/http/cookiejar"
 
-	"github.com/dop251/goja"
-	"go.k6.io/k6/js/common"
-	"go.k6.io/k6/js/modules"
-	"go.k6.io/k6/lib/netext"
-	"go.k6.io/k6/lib/netext/httpext"
+	"github.com/grafana/sobek"
+	"go.k6.io/k6/v2/js/common"
+	"go.k6.io/k6/v2/js/modules"
+	"go.k6.io/k6/v2/lib/netext"
+	"go.k6.io/k6/v2/lib/netext/httpext"
 )
 
 // RootModule is the global module object type. It is instantiated once per test
@@ -43,7 +23,7 @@ type ModuleInstance struct {
 	vu            modules.VU
 	rootModule    *RootModule
 	defaultClient *Client
-	exports       *goja.Object
+	exports       *sobek.Object
 }
 
 var (
@@ -74,7 +54,7 @@ func (r *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		responseCallback: defaultExpectedStatuses.match,
 	}
 
-	mustExport := func(name string, value interface{}) {
+	mustExport := func(name string, value any) {
 		if err := mi.exports.Set(name, value); err != nil {
 			common.Throw(rt, err)
 		}
@@ -88,24 +68,51 @@ func (r *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	// TODO: refactor so the Client actually has better APIs and these are
 	// wrappers (facades) that convert the old k6 idiosyncratic APIs to the new
 	// proper Client ones that accept Request objects and don't suck
-	mustExport("get", func(url goja.Value, args ...goja.Value) (*Response, error) {
+	mustExport("get", func(url sobek.Value, args ...sobek.Value) (*Response, error) {
+		// http.get should not have more than one additional argument
+		if len(args) > 1 {
+			if state := mi.vu.State(); state != nil {
+				state.Logger.Warnf(
+					"http.get only accepts a url and a params argument (2 arguments), but %d were given",
+					len(args)+1,
+				)
+			}
+		}
 		// http.get(url, params) doesn't have a body argument, so we add undefined
 		// as the third argument to http.request(method, url, body, params)
-		args = append([]goja.Value{goja.Undefined()}, args...)
+		args = append([]sobek.Value{sobek.Undefined()}, args...)
 		return mi.defaultClient.Request(http.MethodGet, url, args...)
 	})
-	mustExport("head", func(url goja.Value, args ...goja.Value) (*Response, error) {
+	mustExport("head", func(url sobek.Value, args ...sobek.Value) (*Response, error) {
+		// http.head should not have more than one additional argument
+		if len(args) > 1 {
+			if state := mi.vu.State(); state != nil {
+				state.Logger.Warnf(
+					"http.head only accepts a url and a params argument (2 arguments), but %d were given",
+					len(args)+1,
+				)
+			}
+		}
 		// http.head(url, params) doesn't have a body argument, so we add undefined
 		// as the third argument to http.request(method, url, body, params)
-		args = append([]goja.Value{goja.Undefined()}, args...)
+		args = append([]sobek.Value{sobek.Undefined()}, args...)
 		return mi.defaultClient.Request(http.MethodHead, url, args...)
 	})
+	// methodQuery is the HTTP QUERY method, standardized by RFC 10008. The Go
+	// standard library doesn't define a constant for it yet, but Go 1.28 adds
+	// net/http.MethodQuery (see the net/http section of the Go 1.28 release
+	// notes). Once k6 moves to Go 1.28, this local constant should be replaced
+	// by the standard library one.
+	const methodQuery = "QUERY"
+
 	mustExport("post", mi.defaultClient.getMethodClosure(http.MethodPost))
 	mustExport("put", mi.defaultClient.getMethodClosure(http.MethodPut))
 	mustExport("patch", mi.defaultClient.getMethodClosure(http.MethodPatch))
+	mustExport("query", mi.defaultClient.getMethodClosure(methodQuery))
 	mustExport("del", mi.defaultClient.getMethodClosure(http.MethodDelete))
 	mustExport("options", mi.defaultClient.getMethodClosure(http.MethodOptions))
 	mustExport("request", mi.defaultClient.Request)
+	mustExport("asyncRequest", mi.defaultClient.asyncRequest)
 	mustExport("batch", mi.defaultClient.Batch)
 	mustExport("setResponseCallback", mi.defaultClient.SetResponseCallback)
 
@@ -134,7 +141,7 @@ func (mi *ModuleInstance) defineConstants() {
 	rt := mi.vu.Runtime()
 	mustAddProp := func(name, val string) {
 		err := mi.exports.DefineDataProperty(
-			name, rt.ToValue(val), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE,
+			name, rt.ToValue(val), sobek.FLAG_FALSE, sobek.FLAG_FALSE, sobek.FLAG_TRUE,
 		)
 		if err != nil {
 			common.Throw(rt, err)
@@ -160,7 +167,7 @@ func (mi *ModuleInstance) defineConstants() {
 	mustAddProp("OCSP_REASON_AA_COMPROMISE", netext.OCSP_REASON_AA_COMPROMISE)
 }
 
-func (mi *ModuleInstance) newCookieJar(call goja.ConstructorCall) *goja.Object {
+func (mi *ModuleInstance) newCookieJar(_ sobek.ConstructorCall) *sobek.Object {
 	rt := mi.vu.Runtime()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -170,7 +177,7 @@ func (mi *ModuleInstance) newCookieJar(call goja.ConstructorCall) *goja.Object {
 }
 
 // getVUCookieJar returns the active cookie jar for the current VU.
-func (mi *ModuleInstance) getVUCookieJar(call goja.FunctionCall) goja.Value {
+func (mi *ModuleInstance) getVUCookieJar(_ sobek.FunctionCall) sobek.Value {
 	rt := mi.vu.Runtime()
 	if state := mi.vu.State(); state != nil {
 		return rt.ToValue(&CookieJar{mi, state.CookieJar})

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -29,10 +9,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/ui/pb"
+	"go.k6.io/k6/v2/internal/ui/pb"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/lib/types"
+	"go.k6.io/k6/v2/metrics"
 )
 
 const constantVUsType = "constant-vus"
@@ -108,7 +88,7 @@ func (clvc ConstantVUsConfig) GetExecutionRequirements(et *lib.ExecutionTuple) [
 	return []lib.ExecutionStep{
 		{
 			TimeOffset: 0,
-			PlannedVUs: uint64(clvc.GetVUs(et)),
+			PlannedVUs: uint64(clvc.GetVUs(et)), //nolint:gosec
 		},
 		{
 			TimeOffset: clvc.Duration.TimeDuration() + clvc.GracefulStop.TimeDuration(),
@@ -142,15 +122,16 @@ var _ lib.Executor = &ConstantVUs{}
 
 // Run constantly loops through as many iterations as possible on a fixed number
 // of VUs for the specified duration.
-func (clv ConstantVUs) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
+func (clv ConstantVUs) Run(parentCtx context.Context, _ chan<- metrics.SampleContainer) (err error) {
 	numVUs := clv.config.GetVUs(clv.executionState.ExecutionTuple)
 	duration := clv.config.Duration.TimeDuration()
 	gracefulStop := clv.config.GetGracefulStop()
 
 	waitOnProgressChannel := make(chan struct{})
-	startTime, maxDurationCtx, regDurationCtx, cancel := getDurationContexts(parentCtx, duration, gracefulStop)
+	startTime, maxDurationCtx, regDurationCtx, cancel, regCancel := getDurationContexts(parentCtx, duration, gracefulStop)
 	defer func() {
 		cancel()
+		regCancel()
 		<-waitOnProgressChannel
 	}()
 
@@ -200,21 +181,19 @@ func (clv ConstantVUs) Run(parentCtx context.Context, out chan<- metrics.SampleC
 		defer cancel()
 
 		activeVU := initVU.Activate(
-			getVUActivationParams(ctx, clv.config.BaseConfig, returnVU,
-				clv.nextIterationCounters))
+			getVUActivationParams(ctx, clv.config.BaseConfig, returnVU, clv.nextIterationCounters))
 
 		for {
 			select {
 			case <-regDurationDone:
 				return // don't make more iterations
-			default:
-				// continue looping
+			default: // continue looping
 			}
 			runIteration(maxDurationCtx, activeVU)
 		}
 	}
 
-	for i := int64(0); i < numVUs; i++ {
+	for range numVUs {
 		initVU, err := clv.executionState.GetPlannedVU(clv.logger, true)
 		if err != nil {
 			cancel()

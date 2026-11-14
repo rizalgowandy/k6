@@ -8,6 +8,8 @@ Before you begin, make sure to familiarize yourself with the [Code of Conduct](C
 
 If you want to chat with the team or the community, you can [join our community forums](https://community.k6.io/).
 
+> **Note:** To disclose security issues, refer to [SECURITY.md](https://github.com/grafana/k6?tab=security-ov-file).
+
 ## Filing issues
 
 Don't be afraid to file issues! Nobody can fix a bug we don't know exists, or add a feature we didn't think of.
@@ -18,7 +20,7 @@ That said, "how do I..."-type questions are often more suited for community foru
 
 ## Contributing code
 
-If you'd like to contribute code to k6, this is the basic procedure. Make sure to follow the [style guide](#style-guide) described below.
+If you'd like to contribute code to k6, this is the basic procedure. Make sure to follow the [style guide](#code-style) described below.
 
 1. Find an issue you'd like to fix. If there is none already, or you'd like to add a feature, please open one, and we can talk about how to do it.  Out of respect for your time, please start a discussion regarding any bigger contributions either in a GitHub Issue, in the community forums **before** you get started on the implementation.
   
@@ -45,16 +47,18 @@ For alternative ways of cloning the k6 repository, please refer to [GitHub's clo
 
 #### Running the linter
 
-We make use of the [golangci-lint](https://github.com/golangci/golangci-lint) tool to lint the code in CI. The actual version you can find in our [`.golangci.yml`](https://github.com/grafana/k6/blob/master/.golangci.yml#L1). To run it locally, first [install it](https://golangci-lint.run/usage/install/#local-installation), then run:
+We make use of the [golangci-lint](https://github.com/golangci/golangci-lint) tool to lint the code in CI. The base configuration, including the golangci-lint version, lives in [grafana/k6-ci](https://github.com/grafana/k6-ci), and k6-specific changes to it are kept in [`.golangci.patch`](https://github.com/grafana/k6/blob/master/.golangci.patch). To run it locally with the same version and configuration as CI, run:
 
 ```bash
 make lint
 ```
 
-You can also run the linter inside the docker container, which will benefit from the version of the linter being the same as it will be in CI.
+There is no need to install golangci-lint yourself. `make lint` downloads the configuration into `build/lint/`, applies the patch and runs the matching golangci-lint version with `go run`.
+
+If you need to change the linter configuration, edit `build/lint/.golangci.yml` after running `make lint`, then regenerate the patch with:
 
 ```bash
-make ci-like-lint
+make update-lint-patch
 ```
 
 #### Running the test suite

@@ -1,53 +1,80 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cloudapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"time"
 
+	"github.com/mstoykov/envconfig"
 	"gopkg.in/guregu/null.v3"
 
-	"github.com/mstoykov/envconfig"
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/lib/types"
 )
 
-// Config holds all the necessary data and options for sending metrics to the Load Impact cloud.
-//nolint: lll
+// Config holds all the necessary data and options for sending metrics to the k6 Cloud.
+//
+//nolint:lll
 type Config struct {
 	// TODO: refactor common stuff between cloud execution and output
-	Token     null.String `json:"token" envconfig:"K6_CLOUD_TOKEN"`
-	ProjectID null.Int    `json:"projectID" envconfig:"K6_CLOUD_PROJECT_ID"`
-	Name      null.String `json:"name" envconfig:"K6_CLOUD_NAME"`
+	StackID          null.Int    `json:"stackID" envconfig:"K6_CLOUD_STACK_ID"`
+	StackURL         null.String `json:"stackURL" envconfig:"K6_CLOUD_STACK_URL"`
+	DefaultProjectID null.Int    `json:"defaultProjectID"`
+	Token            null.String `json:"token" envconfig:"K6_CLOUD_TOKEN"`
+	ProjectID        null.Int    `json:"projectID" envconfig:"K6_CLOUD_PROJECT_ID"`
+	Name             null.String `json:"name" envconfig:"K6_CLOUD_NAME"`
 
 	Host    null.String        `json:"host" envconfig:"K6_CLOUD_HOST"`
+	Hostv6  null.String        `json:"hostv6" envconfig:"K6_CLOUD_HOST_V6"` // For test purposes only
 	Timeout types.NullDuration `json:"timeout" envconfig:"K6_CLOUD_TIMEOUT"`
 
-	LogsTailURL null.String `json:"-" envconfig:"K6_CLOUD_LOGS_TAIL_URL"`
-	PushRefID   null.String `json:"pushRefID" envconfig:"K6_CLOUD_PUSH_REF_ID"`
-	WebAppURL   null.String `json:"webAppURL" envconfig:"K6_CLOUD_WEB_APP_URL"`
-	NoCompress  null.Bool   `json:"noCompress" envconfig:"K6_CLOUD_NO_COMPRESS"`
-	StopOnError null.Bool   `json:"stopOnError" envconfig:"K6_CLOUD_STOP_ON_ERROR"`
+	LogsTailURL    null.String `json:"-" envconfig:"K6_CLOUD_LOGS_TAIL_URL"`
+	WebAppURL      null.String `json:"webAppURL" envconfig:"K6_CLOUD_WEB_APP_URL"`
+	TestRunDetails null.String `json:"testRunDetails" envconfig:"K6_CLOUD_TEST_RUN_DETAILS"`
+	NoCompress     null.Bool   `json:"noCompress" envconfig:"K6_CLOUD_NO_COMPRESS"`
+	StopOnError    null.Bool   `json:"stopOnError" envconfig:"K6_CLOUD_STOP_ON_ERROR"`
+	APIVersion     null.Int    `json:"apiVersion" envconfig:"K6_CLOUD_API_VERSION"`
 
-	MaxMetricSamplesPerPackage null.Int `json:"maxMetricSamplesPerPackage" envconfig:"K6_CLOUD_MAX_METRIC_SAMPLES_PER_PACKAGE"`
+	// MetricsPushURL is the URL to push metrics to. It is set only
+	// programmatically: from the provisioning API's start_local_execution
+	// response in the self-provision flow, or from K6_CLOUD_METRICS_PUSH_URL
+	// read explicitly by the cmd layer (internal/cmd/outputs_cloud.go) in the
+	// externally-provisioned flow. It is deliberately NOT env-bound (no
+	// envconfig tag): binding it would let a stray K6_CLOUD_METRICS_PUSH_URL
+	// in the environment override the value obtained from provisioning and
+	// corrupt the self-provisioned push. When set, the cloud Output pushes
+	// here instead of deriving a URL from Host.
+	MetricsPushURL null.String `json:"metricsPushURL"`
+
+	// TestRunToken is the scoped test-run token used as the Bearer token for
+	// metrics push (and notify, in the self-provision flow). Like
+	// MetricsPushURL it is set only programmatically — from the provisioning
+	// response, or from K6_CLOUD_TEST_RUN_TOKEN read explicitly by the cmd
+	// layer for an externally-provisioned run — and is deliberately NOT
+	// env-bound, so a stray env var cannot hijack the self-provisioned push.
+	TestRunToken null.String `json:"testRunToken"`
+
+	// PushRefID is the identifier used by k6 Cloud to correlate all the things that
+	// belong to the same test run/execution. Currently, it is equivalent to the test run id.
+	// But, in the future, or in future solutions (e.g. Synthetic Monitoring), there might be
+	// no test run id, and we may still need an identifier to correlate all the things.
+	PushRefID null.String `json:"pushRefID" envconfig:"K6_CLOUD_PUSH_REF_ID"`
+
+	// Log-push configuration for `k6 cloud run --local-execution`. Like the
+	// scoped push creds above, these are programmatic-only (no envconfig tag):
+	// the self-provisioned flow sets them from the provisioning API's
+	// runtime_config.logs, while the externally-provisioned flow reads the
+	// K6_CLOUD_LOGS_* env vars explicitly in cmd (applyExternalLogsConfig), so
+	// a stray env value can't override the run-scoped values. Consumed by cmd
+	// to configure the cloud log pusher; never serialised.
+	LogsPushURL        null.String        `json:"-"`
+	LogsLevel          null.String        `json:"-"`
+	LogsLimit          null.Int           `json:"-"`
+	LogsPushPeriod     types.NullDuration `json:"-"`
+	LogsMessageMaxSize null.Int           `json:"-"`
+	LogsAllowedLabels  []string           `json:"-"`
+
+	// Defines the max allowed number of time series in a single batch.
+	MaxTimeSeriesInBatch null.Int `json:"maxTimeSeriesInBatch" envconfig:"K6_CLOUD_MAX_TIME_SERIES_IN_BATCH"`
 
 	// The time interval between periodic API calls for sending samples to the cloud ingest service.
 	MetricPushInterval types.NullDuration `json:"metricPushInterval" envconfig:"K6_CLOUD_METRIC_PUSH_INTERVAL"`
@@ -55,136 +82,72 @@ type Config struct {
 	// This is how many concurrent pushes will be done at the same time to the cloud
 	MetricPushConcurrency null.Int `json:"metricPushConcurrency" envconfig:"K6_CLOUD_METRIC_PUSH_CONCURRENCY"`
 
-	// Aggregation docs:
-	//
-	// If AggregationPeriod is specified and if it is greater than 0, HTTP metric aggregation
-	// with that period will be enabled. The general algorithm is this:
-	// - HTTP trail samples will be collected separately and not
-	//   included in the default sample buffer (which is directly sent
-	//   to the cloud service every MetricPushInterval).
-	// - On every AggregationCalcInterval, all collected HTTP Trails will be
-	//   split into AggregationPeriod-sized time buckets (time slots) and
-	//   then into sub-buckets according to their tags (each sub-bucket
-	//   will contain only HTTP trails with the same sample tags -
-	//   proto, staus, URL, method, etc.).
-	// - If at that time the specified AggregationWaitPeriod has not passed
-	//   for a particular time bucket, it will be left undisturbed until the next
-	//   AggregationCalcInterval tick comes along.
-	// - If AggregationWaitPeriod has passed for a time bucket, all of its
-	//   sub-buckets will be traversed. Any sub-buckets that have less than
-	//   AggregationMinSamples HTTP trails in them will not be aggregated.
-	//   Instead the HTTP trails in them will just be individually added
-	//   to the default sample buffer, like they would be if there was no
-	//   aggregation.
-	// - Sub-buckets with at least AggregationMinSamples HTTP trails on the
-	//   other hand will be aggregated according to the algorithm below:
-	//     - If AggregationSkipOutlierDetection is enabled, all of the collected
-	//       HTTP trails in that sub-bucket will be directly aggregated into a single
-	//       compoind metric sample, without any attempt at outlier detection.
-	//       IMPORTANT: This is intended only for testing purposes only or, in
-	//       extreme cases, when the resulting metrics' precision isn't very important,
-	//       since it could lead to a huge loss of granularity and the masking
-	//       of any outlier samples in the data.
-	//     - By default (since AggregationSkipOutlierDetection is not enabled),
-	//       the collected HTTP trails will be checked for outliers, so we don't loose
-	//       granularity by accidentally aggregating them. That happens by finding
-	//       the "quartiles" (by default the 75th and 25th percentiles) in the
-	//       sub-bucket datapoints and using the inter-quartile range (IQR) to find
-	//       any outliers (https://en.wikipedia.org/wiki/Interquartile_range#Outliers,
-	//       though the specific parameters and coefficients can be customized
-	//       by the AggregationOutlier{Radius,CoefLower,CoefUpper} options)
-	//     - Depending on the number of samples in the sub-bucket, two different
-	//       algorithms could be used to calculate the quartiles. If there are
-	//       fewer samples (between AggregationMinSamples and AggregationOutlierAlgoThreshold),
-	//       then a more precise but also more computationally-heavy sorting-based algorithm
-	//       will be used. For sub-buckets with more samples, a lighter quickselect-based
-	//       algorithm will be used, potentially with a very minor loss of precision.
-	//     - Regardless of the used algorithm, once the quartiles for that sub-bucket
-	//       are found and the IQR is calculated, every HTTP trail in the sub-bucket will
-	//       be checked if it seems like an outlier. HTTP trails are evaluated by two different
-	//       criteria whether they seem like outliers - by their total connection time (i.e.
-	//       http_req_connecting + http_req_tls_handshaking) and by their total request time
-	//       (i.e. http_req_sending + http_req_waiting + http_req_receiving). If any of those
-	//       properties of an HTTP trail is out of the calculated "normal" bounds for the
-	//       sub-bucket, it will be considered an outlier and will be sent to the cloud
-	//       individually - it's simply added to the default sample buffer, like it would
-	//       be if there was no aggregation.
-	//     - Finally, all non-outliers are aggregated and the resultig single metric is also
-	//       added to the default sample buffer for sending to the cloud ingest service
-	//       on the next MetricPushInterval event.
-
 	// If specified and is greater than 0, sample aggregation with that period is enabled
 	AggregationPeriod types.NullDuration `json:"aggregationPeriod" envconfig:"K6_CLOUD_AGGREGATION_PERIOD"`
-
-	// If aggregation is enabled, this is how often new HTTP trails will be sorted into buckets and sub-buckets and aggregated.
-	AggregationCalcInterval types.NullDuration `json:"aggregationCalcInterval" envconfig:"K6_CLOUD_AGGREGATION_CALC_INTERVAL"`
 
 	// If aggregation is enabled, this specifies how long we'll wait for period samples to accumulate before trying to aggregate them.
 	AggregationWaitPeriod types.NullDuration `json:"aggregationWaitPeriod" envconfig:"K6_CLOUD_AGGREGATION_WAIT_PERIOD"`
 
-	// If aggregation is enabled, but the collected samples for a certain AggregationPeriod after AggregationPushDelay has passed are less than this number, they won't be aggregated.
-	AggregationMinSamples null.Int `json:"aggregationMinSamples" envconfig:"K6_CLOUD_AGGREGATION_MIN_SAMPLES"`
+	// Indicates whether to send traces to the k6 Insights backend service.
+	TracesEnabled null.Bool `json:"tracesEnabled" envconfig:"K6_CLOUD_TRACES_ENABLED"`
 
-	// If this is enabled and a sub-bucket has more than AggregationMinSamples HTTP trails in it, they would all be
-	// aggregated without attempting to find and separate any outlier metrics first.
-	// IMPORTANT: This is intended for testing purposes only or, in extreme cases, when the result precision
-	// isn't very important and the improved aggregation percentage would be worth the potentially huge loss
-	// of metric granularity and possible masking of any outlier samples.
-	AggregationSkipOutlierDetection null.Bool `json:"aggregationSkipOutlierDetection" envconfig:"K6_CLOUD_AGGREGATION_SKIP_OUTLIER_DETECTION"`
+	// The host of the k6 Insights backend service.
+	TracesHost null.String `json:"traceHost" envconfig:"K6_CLOUD_TRACES_HOST"`
 
-	// If aggregation and outlier detection are enabled, this option specifies the
-	// number of HTTP trails in a sub-bucket that determine which quartile-calculating
-	// algorithm would be used:
-	// - for fewer samples (between MinSamples and OutlierAlgoThreshold), a more precise
-	//   (i.e. supporting interpolation), but also more computationally-heavy sorting
-	//   algorithm will be used to find the quartiles.
-	// - if there are more samples than OutlierAlgoThreshold in the sub-bucket, a
-	//   QuickSelect-based (https://en.wikipedia.org/wiki/Quickselect) algorithm will
-	//   be used. It doesn't support interpolation, so there's a small loss of precision
-	//   in the outlier detection, but it's not as resource-heavy as the sorting algorithm.
-	AggregationOutlierAlgoThreshold null.Int `json:"aggregationOutlierAlgoThreshold" envconfig:"K6_CLOUD_AGGREGATION_OUTLIER_ALGO_THRESHOLD"`
+	// This is how many concurrent pushes will be done at the same time to the cloud
+	TracesPushConcurrency null.Int `json:"tracesPushConcurrency" envconfig:"K6_CLOUD_TRACES_PUSH_CONCURRENCY"`
 
-	// The radius (as a fraction) from the median at which to sample Q1 and Q3.
-	// By default it's one quarter (0.25) and if set to something different, the Q in IQR
-	// won't make much sense... But this would allow us to select tighter sample groups for
-	// aggregation if we want.
-	AggregationOutlierIqrRadius null.Float `json:"aggregationOutlierIqrRadius" envconfig:"K6_CLOUD_AGGREGATION_OUTLIER_IQR_RADIUS"`
-
-	// Connection or request times with how many IQRs below Q1 to consier as non-aggregatable outliers.
-	AggregationOutlierIqrCoefLower null.Float `json:"aggregationOutlierIqrCoefLower" envconfig:"K6_CLOUD_AGGREGATION_OUTLIER_IQR_COEF_LOWER"`
-
-	// Connection or request times with how many IQRs above Q3 to consier as non-aggregatable outliers.
-	AggregationOutlierIqrCoefUpper null.Float `json:"aggregationOutlierIqrCoefUpper" envconfig:"K6_CLOUD_AGGREGATION_OUTLIER_IQR_COEF_UPPER"`
+	// The time interval between periodic API calls for sending samples to the cloud ingest service.
+	TracesPushInterval types.NullDuration `json:"tracesPushInterval" envconfig:"K6_CLOUD_TRACES_PUSH_INTERVAL"`
 }
 
 // NewConfig creates a new Config instance with default values for some fields.
 func NewConfig() Config {
 	return Config{
-		Host:                       null.NewString("https://ingest.k6.io", false),
-		LogsTailURL:                null.NewString("wss://cloudlogs.k6.io/api/v1/tail", false),
-		WebAppURL:                  null.NewString("https://app.k6.io", false),
-		MetricPushInterval:         types.NewNullDuration(1*time.Second, false),
-		MetricPushConcurrency:      null.NewInt(1, false),
-		MaxMetricSamplesPerPackage: null.NewInt(100000, false),
-		Timeout:                    types.NewNullDuration(1*time.Minute, false),
-		// Aggregation is disabled by default, since AggregationPeriod has no default value
-		// but if it's enabled manually or from the cloud service, those are the default values it will use:
-		AggregationCalcInterval:         types.NewNullDuration(3*time.Second, false),
-		AggregationWaitPeriod:           types.NewNullDuration(5*time.Second, false),
-		AggregationMinSamples:           null.NewInt(25, false),
-		AggregationOutlierAlgoThreshold: null.NewInt(75, false),
-		AggregationOutlierIqrRadius:     null.NewFloat(0.25, false),
+		APIVersion:            null.NewInt(2, false),
+		Host:                  null.NewString("https://ingest.k6.io", false),
+		Hostv6:                null.NewString("https://api.k6.io", false),
+		LogsTailURL:           null.NewString("wss://cloudlogs.k6.io/api/v1/tail", false),
+		WebAppURL:             null.NewString("https://app.k6.io", false),
+		MetricPushInterval:    types.NewNullDuration(1*time.Second, false),
+		MetricPushConcurrency: null.NewInt(1, false),
+		Timeout:               types.NewNullDuration(1*time.Minute, false),
 
-		// Since we're measuring durations, the upper coefficient is slightly
-		// lower, since outliers from that side are more interesting than ones
-		// close to zero.
-		AggregationOutlierIqrCoefLower: null.NewFloat(1.5, false),
-		AggregationOutlierIqrCoefUpper: null.NewFloat(1.3, false),
+		// The set value (1000) is selected for performance reasons.
+		// Any change to this value should be first discussed with internal stakeholders.
+		MaxTimeSeriesInBatch: null.NewInt(1000, false),
+
+		// TODO: the following values were used by the previous default version (v1).
+		// We decided to keep the same values mostly for having a smoother migration to v2.
+		// Because the previous version's aggregation config, a few lines below, is overwritten
+		// by the remote service with the same values that we are now setting here for v2.
+		// When the migration will be completed we may evaluate to re-discuss them
+		// as we may evaluate to reduce these values - especially the waiting period.
+		// A more specific request about waiting period is mentioned in the link below:
+		// https://github.com/grafana/k6/blob/44e1e63aadb66784ff0a12b8d9821a0fdc9e7467/output/cloud/expv2/collect.go#L72-L77
+		AggregationPeriod:     types.NewNullDuration(3*time.Second, false),
+		AggregationWaitPeriod: types.NewNullDuration(8*time.Second, false),
+
+		TracesEnabled:         null.NewBool(true, false),
+		TracesHost:            null.NewString("grpc-k6-api-prod-prod-us-east-0.grafana.net:443", false),
+		TracesPushInterval:    types.NewNullDuration(1*time.Second, false),
+		TracesPushConcurrency: null.NewInt(1, false),
 	}
 }
 
 // Apply saves config non-zero config values from the passed config in the receiver.
+//
+//nolint:cyclop,funlen,gocognit
 func (c Config) Apply(cfg Config) Config {
+	if cfg.StackID.Valid {
+		c.StackID = cfg.StackID
+	}
+	if cfg.StackURL.Valid && !c.StackURL.Valid {
+		c.StackURL = cfg.StackURL
+	}
+	if cfg.DefaultProjectID.Valid {
+		c.DefaultProjectID = cfg.DefaultProjectID
+	}
 	if cfg.Token.Valid {
 		c.Token = cfg.Token
 	}
@@ -197,14 +160,44 @@ func (c Config) Apply(cfg Config) Config {
 	if cfg.Host.Valid && cfg.Host.String != "" {
 		c.Host = cfg.Host
 	}
+	if cfg.Hostv6.Valid && cfg.Hostv6.String != "" {
+		c.Hostv6 = cfg.Hostv6
+	}
 	if cfg.LogsTailURL.Valid && cfg.LogsTailURL.String != "" {
 		c.LogsTailURL = cfg.LogsTailURL
+	}
+	if cfg.MetricsPushURL.Valid {
+		c.MetricsPushURL = cfg.MetricsPushURL
+	}
+	if cfg.TestRunToken.Valid {
+		c.TestRunToken = cfg.TestRunToken
 	}
 	if cfg.PushRefID.Valid {
 		c.PushRefID = cfg.PushRefID
 	}
+	if cfg.LogsPushURL.Valid {
+		c.LogsPushURL = cfg.LogsPushURL
+	}
+	if cfg.LogsLevel.Valid {
+		c.LogsLevel = cfg.LogsLevel
+	}
+	if cfg.LogsLimit.Valid {
+		c.LogsLimit = cfg.LogsLimit
+	}
+	if cfg.LogsPushPeriod.Valid {
+		c.LogsPushPeriod = cfg.LogsPushPeriod
+	}
+	if cfg.LogsMessageMaxSize.Valid {
+		c.LogsMessageMaxSize = cfg.LogsMessageMaxSize
+	}
+	if len(cfg.LogsAllowedLabels) > 0 {
+		c.LogsAllowedLabels = cfg.LogsAllowedLabels
+	}
 	if cfg.WebAppURL.Valid {
 		c.WebAppURL = cfg.WebAppURL
+	}
+	if cfg.TestRunDetails.Valid {
+		c.TestRunDetails = cfg.TestRunDetails
 	}
 	if cfg.NoCompress.Valid {
 		c.NoCompress = cfg.NoCompress
@@ -215,8 +208,11 @@ func (c Config) Apply(cfg Config) Config {
 	if cfg.Timeout.Valid {
 		c.Timeout = cfg.Timeout
 	}
-	if cfg.MaxMetricSamplesPerPackage.Valid {
-		c.MaxMetricSamplesPerPackage = cfg.MaxMetricSamplesPerPackage
+	if cfg.APIVersion.Valid {
+		c.APIVersion = cfg.APIVersion
+	}
+	if cfg.MaxTimeSeriesInBatch.Valid {
+		c.MaxTimeSeriesInBatch = cfg.MaxTimeSeriesInBatch
 	}
 	if cfg.MetricPushInterval.Valid {
 		c.MetricPushInterval = cfg.MetricPushInterval
@@ -224,75 +220,50 @@ func (c Config) Apply(cfg Config) Config {
 	if cfg.MetricPushConcurrency.Valid {
 		c.MetricPushConcurrency = cfg.MetricPushConcurrency
 	}
-
+	if cfg.TracesEnabled.Valid {
+		c.TracesEnabled = cfg.TracesEnabled
+	}
+	if cfg.TracesHost.Valid {
+		c.TracesHost = cfg.TracesHost
+	}
+	if cfg.TracesPushInterval.Valid {
+		c.TracesPushInterval = cfg.TracesPushInterval
+	}
+	if cfg.TracesPushConcurrency.Valid {
+		c.TracesPushConcurrency = cfg.TracesPushConcurrency
+	}
 	if cfg.AggregationPeriod.Valid {
 		c.AggregationPeriod = cfg.AggregationPeriod
-	}
-	if cfg.AggregationCalcInterval.Valid {
-		c.AggregationCalcInterval = cfg.AggregationCalcInterval
 	}
 	if cfg.AggregationWaitPeriod.Valid {
 		c.AggregationWaitPeriod = cfg.AggregationWaitPeriod
 	}
-	if cfg.AggregationMinSamples.Valid {
-		c.AggregationMinSamples = cfg.AggregationMinSamples
-	}
-	if cfg.AggregationSkipOutlierDetection.Valid {
-		c.AggregationSkipOutlierDetection = cfg.AggregationSkipOutlierDetection
-	}
-	if cfg.AggregationOutlierAlgoThreshold.Valid {
-		c.AggregationOutlierAlgoThreshold = cfg.AggregationOutlierAlgoThreshold
-	}
-	if cfg.AggregationOutlierIqrRadius.Valid {
-		c.AggregationOutlierIqrRadius = cfg.AggregationOutlierIqrRadius
-	}
-	if cfg.AggregationOutlierIqrCoefLower.Valid {
-		c.AggregationOutlierIqrCoefLower = cfg.AggregationOutlierIqrCoefLower
-	}
-	if cfg.AggregationOutlierIqrCoefUpper.Valid {
-		c.AggregationOutlierIqrCoefUpper = cfg.AggregationOutlierIqrCoefUpper
-	}
 	return c
-}
-
-// MergeFromExternal merges three fields from the JSON in a loadimpact key of
-// the provided external map. Used for options.ext.loadimpact settings.
-func MergeFromExternal(external map[string]json.RawMessage, conf *Config) error {
-	if val, ok := external["loadimpact"]; ok {
-		// TODO: Important! Separate configs and fix the whole 2 configs mess!
-		tmpConfig := Config{}
-		if err := json.Unmarshal(val, &tmpConfig); err != nil {
-			return err
-		}
-		// Only take out the ProjectID, Name and Token from the options.ext.loadimpact map:
-		if tmpConfig.ProjectID.Valid {
-			conf.ProjectID = tmpConfig.ProjectID
-		}
-		if tmpConfig.Name.Valid {
-			conf.Name = tmpConfig.Name
-		}
-		if tmpConfig.Token.Valid {
-			conf.Token = tmpConfig.Token
-		}
-	}
-	return nil
 }
 
 // GetConsolidatedConfig combines the default config values with the JSON config
 // values and environment variables and returns the final result.
+// it also returns a warning message that could be shown to the user.
+// to bring some attention to the fact that the user.
 func GetConsolidatedConfig(
-	jsonRawConf json.RawMessage, env map[string]string, configArg string, external map[string]json.RawMessage,
-) (Config, error) {
+	jsonRawConf json.RawMessage,
+	env map[string]string,
+	configArg string,
+	cloudConfig json.RawMessage,
+) (Config, string, error) {
+	warn := ""
+
 	result := NewConfig()
 	if jsonRawConf != nil {
 		jsonConf := Config{}
 		if err := json.Unmarshal(jsonRawConf, &jsonConf); err != nil {
-			return result, err
+			return result, warn, err
 		}
 		result = result.Apply(jsonConf)
 	}
-	if err := MergeFromExternal(external, &result); err != nil {
-		return result, err
+
+	if err := extractFromCloudOption(cloudConfig, &result); err != nil {
+		return result, warn, err
 	}
 
 	envConfig := Config{}
@@ -301,7 +272,7 @@ func GetConsolidatedConfig(
 		return v, ok
 	}); err != nil {
 		// TODO: get rid of envconfig and actually use the env parameter...
-		return result, err
+		return result, warn, err
 	}
 	result = result.Apply(envConfig)
 
@@ -309,5 +280,61 @@ func GetConsolidatedConfig(
 		result.Name = null.StringFrom(configArg)
 	}
 
-	return result, nil
+	return result, warn, nil
+}
+
+// extractFromCloudOption merges fields from the JSON in a cloud key of
+// the provided external map. Used for options.cloud settings.
+func extractFromCloudOption(
+	cloudConfig json.RawMessage,
+	conf *Config,
+) error {
+	tmpConfig := Config{}
+	if cloudConfig == nil {
+		return nil
+	}
+	if err := json.Unmarshal(cloudConfig, &tmpConfig); err != nil {
+		return err
+	}
+
+	// Only merge ProjectID, Name, Token, and StackID from options.
+	// StackURL and DefaultProjectID can only be set via login.
+	if tmpConfig.ProjectID.Valid {
+		conf.ProjectID = tmpConfig.ProjectID
+	}
+	if tmpConfig.Name.Valid {
+		conf.Name = tmpConfig.Name
+	}
+	if tmpConfig.Token.Valid {
+		conf.Token = tmpConfig.Token
+	}
+	if tmpConfig.StackID.Valid {
+		conf.StackID = tmpConfig.StackID
+	}
+
+	return nil
+}
+
+// GetTemporaryCloudConfig returns a temporary cloud config.
+// Original comment
+// TODO: Fix this
+// We reuse cloud.Config for parsing options.cloud, but this probably shouldn't be
+// done, as the idea of options.cloud is that they are extensible without touching k6. But in
+// order for this to happen, we shouldn't actually marshal cloud.Config on top of it, because
+// it will be missing some fields that aren't actually mentioned in the struct.
+// So in order for use to copy the fields that we need for k6 cloud's api we unmarshal in
+// map[string]any and copy what we need if it isn't set already
+func GetTemporaryCloudConfig(cloudConfig json.RawMessage) (map[string]any, error) {
+	tmpCloudConfig := make(map[string]any, 3)
+
+	if cloudConfig == nil {
+		return tmpCloudConfig, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(cloudConfig))
+	dec.UseNumber() // otherwise float64 are used
+	if err := dec.Decode(&tmpCloudConfig); err != nil {
+		return nil, err
+	}
+
+	return tmpCloudConfig, nil
 }

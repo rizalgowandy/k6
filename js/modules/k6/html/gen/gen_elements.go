@@ -1,23 +1,6 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
+// Package main - this package generates some of the code for k6/html
+//
+//nolint:goconst
 package main
 
 import (
@@ -74,11 +57,11 @@ const (
 )
 
 // Some common TemplateArgs
+//
 //nolint:lll,gochecknoglobals
 var (
 	// Default return values for urlTemplate functions. Either an empty string or the current URL.
-	defaultURLEmpty   = []templateArg{"\"\""}
-	defaultURLCurrent = []templateArg{"e.sel.URL"}
+	defaultURLEmpty = []templateArg{"\"\""}
 
 	// Common default return values for intTemplates
 	defaultInt0      = []templateArg{"0"}
@@ -103,7 +86,7 @@ var (
 	wrapOpts         = []templateArg{"soft", "hard", "off"}
 	kindOpts         = []templateArg{"subtitle", "captions", "descriptions", "chapters", "metadata"}
 
-	// These are the values allowed for the crossorigin attribute, used by the nullableEnumTemplates is always goja.Undefined
+	// These are the values allowed for the crossorigin attribute, used by the nullableEnumTemplates is always sobek.Undefined
 	crossOriginOpts = []templateArg{"anonymous", "use-credentials"}
 )
 
@@ -114,16 +97,18 @@ var (
 // TemplateArgs is a list of values to be interpolated in the template.
 
 // The number of TemplateArgs depends on the template type.
-//   stringTemplate: doesn't use any TemplateArgs
-//   boolTemplate: doesn't use any TemplateArgs
-//   constTemplate: uses 1 Template Arg, the generated function always returns that value
-//   intTemplate: needs 1 TemplateArg, used as the default return value (when the attribute was empty).
-//   urlTemplate: needs 1 TemplateArg, used as the default, either "defaultURLEmpty" or "defaultURLCurrent"
-//   enumTemplate: uses any number or more TemplateArg, the gen'd func always returns one of the values in
-//                 the TemplateArgs. The first item in the list is used as the default when the attribute
-//                 was invalid or unset.
-//   nullableEnumTemplate: similar to the enumTemplate except the default is goja.Undefined and the
-//                         return type is goja.Value
+//
+//	stringTemplate: doesn't use any TemplateArgs
+//	boolTemplate: doesn't use any TemplateArgs
+//	constTemplate: uses 1 Template Arg, the generated function always returns that value
+//	intTemplate: needs 1 TemplateArg, used as the default return value (when the attribute was empty).
+//	urlTemplate: needs 1 TemplateArg, used as the default, either "defaultURLEmpty" or "defaultURLCurrent"
+//	enumTemplate: uses any number or more TemplateArg, the gen'd func always returns one of the values in
+//	              the TemplateArgs. The first item in the list is used as the default when the attribute
+//	              was invalid or unset.
+//	nullableEnumTemplate: similar to the enumTemplate except the default is sobek.Undefined and the
+//	                      return type is sobek.Value
+//
 //nolint:gochecknoglobals
 var funcDefs = []struct {
 	Elem, Method, Attr string
@@ -149,7 +134,7 @@ var funcDefs = []struct {
 	{"MediaElement", "CurrentSrc", "src", stringTemplate, nil},
 	{"MediaElement", "DefaultMuted", "muted", boolTemplate, nil},
 	{"MediaElement", "MediaGroup", "mediagroup", stringTemplate, nil},
-	{"BaseElement", "Href", "href", urlTemplate, defaultURLCurrent},
+	{"BaseElement", "Href", "href", urlTemplate, []templateArg{"b.sel.URL"}},
 	{"BaseElement", "Target", "target", stringTemplate, nil},
 	{"ButtonElement", "AccessKey", "accesskey", stringTemplate, nil},
 	{"ButtonElement", "Autofocus", "autofocus", boolTemplate, nil},
@@ -348,11 +333,11 @@ func main() {
 			TemplateType       templateType
 			TemplateArgs       []templateArg
 		}
-		TemplateTypes struct{ String, URL, Enum, Bool, GojaEnum, Int, Const templateType }
+		TemplateTypes struct{ String, URL, Enum, Bool, SobekEnum, Int, Const templateType }
 	}{
 		collector.elemInfos,
 		funcDefs,
-		struct{ String, URL, Enum, Bool, GojaEnum, Int, Const templateType }{
+		struct{ String, URL, Enum, Bool, SobekEnum, Int, Const templateType }{
 			stringTemplate, urlTemplate, enumTemplate, boolTemplate, nullableEnumTemplate, intTemplate, constTemplate,
 		},
 	})
@@ -365,7 +350,7 @@ func main() {
 		logrus.WithError(err).Fatal("format.Source on generated code failed")
 	}
 
-	f, err := os.Create("elements_gen.go")
+	f, err := os.Create("elements_gen.go") //nolint:forbidigo
 	if err != nil {
 		logrus.WithError(err).Fatal("Unable to create the file 'elements_gen.go'")
 	}
@@ -382,21 +367,22 @@ func main() {
 
 //nolint:gochecknoglobals
 var elemFuncsTemplate = template.Must(template.New("").Funcs(template.FuncMap{
-	"buildStruct": buildStruct,
-	"returnType":  returnType,
+	"buildStruct":  buildStruct,
+	"returnType":   returnType,
+	"receiverName": receiverName,
 }).Parse(`// generated by js/modules/k6/html/gen/gen_elements.go;  DO NOT EDIT
 package html
 
-import "github.com/dop251/goja"
+import "github.com/grafana/sobek"
 
-func selToElement(sel Selection) goja.Value {
+func selToElement(sel Selection) sobek.Value {
 	if sel.sel.Length() == 0 {
-		return goja.Undefined()
+		return sobek.Undefined()
 	}
 
 	elem := Element{sel.sel.Nodes[0], &sel}
 
-	switch elem.node.Data { 
+	switch elem.node.Data {
 {{- range $elemName, $elemInfo := .ElemInfos }}
 	case {{ $elemName }}TagName:
 		return sel.rt.ToValue({{ buildStruct $elemInfo }})
@@ -407,44 +393,44 @@ func selToElement(sel Selection) goja.Value {
  }
 
 {{ $templateTypes := .TemplateTypes }}
-{{ range $funcDef := .FuncDefs -}} 
+{{ range $funcDef := .FuncDefs -}}
 
-func (e {{$funcDef.Elem}}) {{$funcDef.Method}}() {{ returnType $funcDef.TemplateType }} {
+func ({{ receiverName $funcDef.Elem }} {{$funcDef.Elem}}) {{$funcDef.Method}}() {{ returnType $funcDef.TemplateType }} {
 {{- if eq $funcDef.TemplateType $templateTypes.Int }}
-	return e.attrAsInt("{{ $funcDef.Attr }}", {{ index $funcDef.TemplateArgs 0 }})
+	return {{ receiverName $funcDef.Elem }}.attrAsInt("{{ $funcDef.Attr }}", {{ index $funcDef.TemplateArgs 0 }})
 {{- else if eq $funcDef.TemplateType $templateTypes.Enum }}
-	attrVal := e.attrAsString("{{ $funcDef.Attr }}")
-	switch attrVal { 
+	attrVal := {{ receiverName $funcDef.Elem }}.attrAsString("{{ $funcDef.Attr }}")
+	switch attrVal {
 	{{- range $optIdx, $optVal := $funcDef.TemplateArgs }}
 	{{- if ne $optIdx 0 }}
 	case "{{$optVal}}":
 		return attrVal
 	{{- end }}
 	{{- end}}
-	default: 
-		return "{{ index $funcDef.TemplateArgs 0 }}" 
+	default:
+		return "{{ index $funcDef.TemplateArgs 0 }}"
 	}
-{{- else if eq $funcDef.TemplateType $templateTypes.GojaEnum }}
-	attrVal, exists := e.sel.sel.Attr("{{ $funcDef.Attr }}")
+{{- else if eq $funcDef.TemplateType $templateTypes.SobekEnum }}
+	attrVal, exists := {{ receiverName $funcDef.Elem }}.sel.sel.Attr("{{ $funcDef.Attr }}")
 	if !exists {
-		return goja.Undefined()
+		return sobek.Undefined()
 	}
-	switch attrVal { 
+	switch attrVal {
 	{{- range $optVal := $funcDef.TemplateArgs }}
 	case "{{$optVal}}":
-		return e.sel.rt.ToValue(attrVal)
+		return {{ receiverName $funcDef.Elem }}.sel.rt.ToValue(attrVal)
 	{{- end}}
 	default:
-		return goja.Undefined()
+		return sobek.Undefined()
 	}
 {{- else if eq $funcDef.TemplateType $templateTypes.Const }}
 	return "{{ index $funcDef.TemplateArgs 0 }}"
 {{- else if eq $funcDef.TemplateType $templateTypes.URL }}
-	return e.attrAsURLString("{{ $funcDef.Attr }}", {{ index $funcDef.TemplateArgs 0 }})
+	return {{ receiverName $funcDef.Elem }}.attrAsURLString("{{ $funcDef.Attr }}", {{ index $funcDef.TemplateArgs 0 }})
 {{- else if eq $funcDef.TemplateType $templateTypes.String }}
-	return e.attrAsString("{{ $funcDef.Attr }}")
+	return {{ receiverName $funcDef.Elem }}.attrAsString("{{ $funcDef.Attr }}")
 {{- else if eq $funcDef.TemplateType $templateTypes.Bool }}
-	return e.attrIsPresent("{{ $funcDef.Attr }}")
+	return {{ receiverName $funcDef.Elem }}.attrIsPresent("{{ $funcDef.Attr }}")
 {{- end}}
 }
 {{ end }}
@@ -467,10 +453,15 @@ func returnType(tt templateType) string {
 	case intTemplate:
 		return "int"
 	case nullableEnumTemplate:
-		return "goja.Value"
+		return "sobek.Value"
 	default:
 		return "string"
 	}
+}
+
+// return the name of the receiver given the name of the type
+func receiverName(t string) string {
+	return strings.ToLower(t[:1])
 }
 
 // Default node handler functions for ast.Inspect. Return itself unless it's found a "const" or "struct" keyword
@@ -493,8 +484,8 @@ func (ce *astInspectState) defaultHandler(node ast.Node) nodeHandlerFunc {
 func (ce *astInspectState) elementTagNameHandler(node ast.Node) nodeHandlerFunc {
 	switch x := node.(type) {
 	case *ast.Ident:
-		if strings.HasSuffix(x.Name, "TagName") {
-			ce.elemName = strings.TrimSuffix(x.Name, "TagName")
+		if before, ok := strings.CutSuffix(x.Name, "TagName"); ok {
+			ce.elemName = before
 			ce.elemInfos[ce.elemName] = &elemInfo{"", ""}
 		}
 

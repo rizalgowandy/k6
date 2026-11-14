@@ -1,27 +1,8 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package fsext
 
 import (
-	"os"
+	"errors"
+	"io/fs"
 	"path/filepath"
 	"sort"
 
@@ -51,7 +32,6 @@ func readDirNames(fs afero.Fs, dirname string) ([]string, error) {
 		return nil, err
 	}
 	err = f.Close()
-
 	if err != nil {
 		return nil, err
 	}
@@ -66,10 +46,10 @@ func readDirNames(fs afero.Fs, dirname string) ([]string, error) {
 
 // walk recursively descends path, calling walkFn
 // adapted from https://github.com/spf13/afero/blob/master/path.go#L27
-func walk(fs afero.Fs, path string, info os.FileInfo, walkFn filepath.WalkFunc) error {
+func walk(fileSystem afero.Fs, path string, info fs.FileInfo, walkFn filepath.WalkFunc) error {
 	err := walkFn(path, info, nil)
 	if err != nil {
-		if info.IsDir() && err == filepath.SkipDir {
+		if info.IsDir() && errors.Is(err, filepath.SkipDir) {
 			return nil
 		}
 		return err
@@ -79,24 +59,25 @@ func walk(fs afero.Fs, path string, info os.FileInfo, walkFn filepath.WalkFunc) 
 		return nil
 	}
 
-	names, err := readDirNames(fs, path)
+	names, err := readDirNames(fileSystem, path)
 	if err != nil {
 		return walkFn(path, info, err)
 	}
 
 	for _, name := range names {
-		filename := filepath.Join(path, name)
-		fileInfo, err := fs.Stat(filename)
+		filename := JoinFilePath(path, name)
+		fileInfo, err := fileSystem.Stat(filename)
 		if err != nil {
-			if err = walkFn(filename, fileInfo, err); err != nil && err != filepath.SkipDir {
+			if err = walkFn(filename, fileInfo, err); err != nil && !errors.Is(err, filepath.SkipDir) {
 				return err
 			}
-		} else {
-			err = walk(fs, filename, fileInfo, walkFn)
-			if err != nil {
-				if !fileInfo.IsDir() || err != filepath.SkipDir {
-					return err
-				}
+			return nil
+		}
+
+		err = walk(fileSystem, filename, fileInfo, walkFn)
+		if err != nil {
+			if !fileInfo.IsDir() || !errors.Is(err, filepath.SkipDir) {
+				return err
 			}
 		}
 	}

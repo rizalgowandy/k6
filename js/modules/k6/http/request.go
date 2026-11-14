@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -32,57 +12,40 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/js/common"
-	"go.k6.io/k6/lib/netext/httpext"
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/js/common"
+	"go.k6.io/k6/v2/lib/netext/httpext"
+	"go.k6.io/k6/v2/lib/types"
 )
 
 // ErrHTTPForbiddenInInitContext is used when a http requests was made in the init context
-var ErrHTTPForbiddenInInitContext = common.NewInitContextError("Making http requests in the init context is not supported")
+var ErrHTTPForbiddenInInitContext = common.NewInitContextError(
+	"Making http requests in the init context is not supported")
 
 // ErrBatchForbiddenInInitContext is used when batch was made in the init context
-var ErrBatchForbiddenInInitContext = common.NewInitContextError("Using batch in the init context is not supported")
+var ErrBatchForbiddenInInitContext = common.NewInitContextError(
+	"Using batch in the init context is not supported")
 
-func (c *Client) getMethodClosure(method string) func(url goja.Value, args ...goja.Value) (*Response, error) {
-	return func(url goja.Value, args ...goja.Value) (*Response, error) {
+func (c *Client) getMethodClosure(method string) func(url sobek.Value, args ...sobek.Value) (*Response, error) {
+	return func(url sobek.Value, args ...sobek.Value) (*Response, error) {
 		return c.Request(method, url, args...)
 	}
 }
 
 // Request makes an http request of the provided `method` and returns a corresponding response by
-// taking goja.Values as arguments
-func (c *Client) Request(method string, url goja.Value, args ...goja.Value) (*Response, error) {
+// taking sobek.Values as arguments
+func (c *Client) Request(method string, url sobek.Value, args ...sobek.Value) (*Response, error) {
 	state := c.moduleInstance.vu.State()
 	if state == nil {
 		return nil, ErrHTTPForbiddenInInitContext
 	}
-
-	var body interface{}
-	var params goja.Value
-
-	if len(args) > 0 {
-		body = args[0].Export()
-	}
-	if len(args) > 1 {
-		params = args[1]
-	}
+	body, params := splitRequestArgs(args)
 
 	req, err := c.parseRequest(method, url, body, params)
 	if err != nil {
-		if state.Options.Throw.Bool {
-			return nil, err
-		}
-		state.Logger.WithField("error", err).Warn("Request Failed")
-		r := httpext.NewResponse()
-		r.Error = err.Error()
-		var k6e httpext.K6Error
-		if errors.As(err, &k6e) {
-			r.ErrorCode = int(k6e.Code)
-		}
-		return &Response{Response: r, client: c}, nil
+		return c.handleParseRequestError(err)
 	}
 
 	resp, err := httpext.MakeRequest(c.moduleInstance.vu.Context(), state, req)
@@ -93,12 +56,79 @@ func (c *Client) Request(method string, url goja.Value, args ...goja.Value) (*Re
 	return c.responseFromHTTPext(resp), nil
 }
 
+func splitRequestArgs(args []sobek.Value) (body any, params sobek.Value) {
+	if len(args) > 0 {
+		body = args[0].Export()
+	}
+	if len(args) > 1 {
+		params = args[1]
+	}
+	return body, params
+}
+
+func (c *Client) handleParseRequestError(err error) (*Response, error) {
+	state := c.moduleInstance.vu.State()
+
+	if state.Options.Throw.Bool {
+		return nil, err
+	}
+	state.Logger.WithField("error", err).Warn("Request Failed")
+	r := httpext.NewResponse()
+	r.Error = err.Error()
+	if k6e, ok := errors.AsType[httpext.K6Error](err); ok {
+		r.ErrorCode = int(k6e.Code)
+	}
+	return &Response{Response: r, client: c}, nil
+}
+
+// asyncRequest makes an http request of the provided `method` and returns a promise. All the networking is done off
+// the event loop and the returned promise will be resolved with the response or rejected with an error
+func (c *Client) asyncRequest(method string, url sobek.Value, args ...sobek.Value) (*sobek.Promise, error) {
+	state := c.moduleInstance.vu.State()
+	if c.moduleInstance.vu.State() == nil {
+		return nil, ErrHTTPForbiddenInInitContext
+	}
+
+	body, params := splitRequestArgs(args)
+	rt := c.moduleInstance.vu.Runtime()
+	req, err := c.parseRequest(method, url, body, params)
+	p, resolve, reject := rt.NewPromise()
+	if err != nil {
+		var resp *Response
+		if resp, err = c.handleParseRequestError(err); err != nil {
+			err = reject(err)
+		} else {
+			err = resolve(resp)
+		}
+		return p, err
+	}
+
+	callback := c.moduleInstance.vu.RegisterCallback()
+
+	go func() {
+		resp, err := httpext.MakeRequest(c.moduleInstance.vu.Context(), state, req)
+		callback(func() error {
+			if err != nil {
+				return reject(err)
+			}
+			c.processResponse(resp, req.ResponseType)
+			return resolve(c.responseFromHTTPext(resp))
+		})
+	}()
+
+	return p, nil
+}
+
 // processResponse stores the body as an ArrayBuffer if indicated by
 // respType. This is done here instead of in httpext.readResponseBody to avoid
-// a reverse dependency on js/common or goja.
+// a reverse dependency on js/common or sobek.
 func (c *Client) processResponse(resp *httpext.Response, respType httpext.ResponseType) {
 	if respType == httpext.ResponseTypeBinary && resp.Body != nil {
-		resp.Body = c.moduleInstance.vu.Runtime().NewArrayBuffer(resp.Body.([]byte))
+		b, ok := resp.Body.([]byte)
+		if !ok {
+			panic("got an unexpected type for the response body, only []byte is accepted")
+		}
+		resp.Body = c.moduleInstance.vu.Runtime().NewArrayBuffer(b)
 	}
 }
 
@@ -107,9 +137,10 @@ func (c *Client) responseFromHTTPext(resp *httpext.Response) *Response {
 }
 
 // TODO: break this function up
-//nolint: gocyclo, cyclop, funlen, gocognit
+//
+//nolint:gocyclo, cyclop, funlen, gocognit
 func (c *Client) parseRequest(
-	method string, reqURL, body interface{}, params goja.Value,
+	method string, reqURL, body any, params sobek.Value,
 ) (*httpext.ParsedHTTPRequest, error) {
 	rt := c.moduleInstance.vu.Runtime()
 	state := c.moduleInstance.vu.State()
@@ -117,7 +148,7 @@ func (c *Client) parseRequest(
 		return nil, ErrHTTPForbiddenInInitContext
 	}
 
-	if urlJSValue, ok := reqURL.(goja.Value); ok {
+	if urlJSValue, ok := reqURL.(sobek.Value); ok {
 		reqURL = urlJSValue.Export()
 	}
 	u, err := httpext.ToURL(reqURL)
@@ -136,8 +167,8 @@ func (c *Client) parseRequest(
 		Throw:            state.Options.Throw.Bool,
 		Redirects:        state.Options.MaxRedirects,
 		Cookies:          make(map[string]*httpext.HTTPRequestCookie),
-		Tags:             make(map[string]string),
 		ResponseCallback: c.responseCallback,
+		TagsAndMeta:      c.moduleInstance.vu.State().Tags.GetCurrentValues(),
 	}
 
 	if state.Options.DiscardResponseBodies.Bool {
@@ -146,16 +177,43 @@ func (c *Client) parseRequest(
 		result.ResponseType = httpext.ResponseTypeText
 	}
 
-	formatFormVal := func(v interface{}) string {
-		// TODO: handle/warn about unsupported/nested values
-		return fmt.Sprintf("%v", v)
+	// formatFormVal converts a single value from a JS object body into its
+	// application/x-www-form-urlencoded string representation.
+	//
+	// JavaScript null and undefined are both exported to a nil Go value; they
+	// are encoded as an empty value (e.g. "key=") instead of Go's default
+	// "<nil>" string. This matches how Node's querystring and jQuery.param
+	// serialize null/undefined. See https://github.com/grafana/k6/issues/1185.
+	//
+	// Nested objects and arrays-of-objects cannot be represented in a flat
+	// urlencoded form body. Rather than emitting Go's "map[...]"/"[...]"
+	// representation, they are encoded as an empty value and a warning is
+	// logged. Users who need to send structured data should serialize it
+	// explicitly, e.g. with JSON.stringify().
+	// See https://github.com/grafana/k6/issues/2369.
+	formatFormVal := func(v any) string {
+		switch val := v.(type) {
+		case nil:
+			return ""
+		case string:
+			return val
+		case map[string]any, []any:
+			state.Logger.Warnf(
+				"cannot urlencode a nested %T value in a request form body; encoding it "+
+					"as an empty value, use JSON.stringify() to send structured data",
+				val,
+			)
+			return ""
+		default:
+			return fmt.Sprintf("%v", val)
+		}
 	}
 
-	handleObjectBody := func(data map[string]interface{}) error {
+	handleObjectBody := func(data map[string]any) error {
 		if !requestContainsFile(data) {
 			bodyQuery := make(url.Values, len(data))
 			for k, v := range data {
-				if arr, ok := v.([]interface{}); ok {
+				if arr, ok := v.([]any); ok {
 					for _, el := range arr {
 						bodyQuery.Add(k, formatFormVal(el))
 					}
@@ -177,7 +235,7 @@ func (c *Client) parseRequest(
 		// Otherwise parameters are treated as standard form field.
 		for k, v := range data {
 			switch ve := v.(type) {
-			case FileData:
+			case *FileData:
 				// writing our own part to handle receiving
 				// different content-type than the default application/octet-stream
 				h := make(textproto.MIMEHeader)
@@ -194,7 +252,11 @@ func (c *Client) parseRequest(
 					return err
 				}
 
-				if _, err := fw.Write(ve.Data); err != nil {
+				data, err := common.ToBytes(ve.Data)
+				if err != nil {
+					return err
+				}
+				if _, err := fw.Write(data); err != nil {
 					return err
 				}
 			default:
@@ -219,18 +281,18 @@ func (c *Client) parseRequest(
 
 	if body != nil {
 		switch data := body.(type) {
-		case map[string]goja.Value:
+		case map[string]sobek.Value:
 			// TODO: fix forms submission and serialization in k6/html before fixing this..
-			newData := map[string]interface{}{}
+			newData := map[string]any{}
 			for k, v := range data {
 				newData[k] = v.Export()
 			}
 			if err := handleObjectBody(newData); err != nil {
 				return nil, err
 			}
-		case goja.ArrayBuffer:
+		case sobek.ArrayBuffer:
 			result.Body = bytes.NewBuffer(data.Bytes())
-		case map[string]interface{}:
+		case map[string]any:
 			if err := handleObjectBody(data); err != nil {
 				return nil, err
 			}
@@ -249,14 +311,15 @@ func (c *Client) parseRequest(
 		result.ActiveJar = state.CookieJar
 	}
 
-	// TODO: ditch goja.Value, reflections and Object and use a simple go map and type assertions?
-	if params != nil && !goja.IsUndefined(params) && !goja.IsNull(params) {
+	// TODO: ditch sobek.Value, reflections and Object and use a simple go map and type assertions?
+	//nolint: nestif
+	if !common.IsNullish(params) {
 		params := params.ToObject(rt)
 		for _, k := range params.Keys() {
 			switch k {
 			case "cookies":
 				cookiesV := params.Get(k)
-				if goja.IsUndefined(cookiesV) || goja.IsNull(cookiesV) {
+				if common.IsNullish(cookiesV) {
 					continue
 				}
 				cookies := cookiesV.ToObject(rt)
@@ -265,11 +328,11 @@ func (c *Client) parseRequest(
 				}
 				for _, key := range cookies.Keys() {
 					cookieV := cookies.Get(key)
-					if goja.IsUndefined(cookieV) || goja.IsNull(cookieV) {
+					if common.IsNullish(cookieV) {
 						continue
 					}
 					switch cookieV.ExportType() {
-					case reflect.TypeOf(map[string]interface{}{}):
+					case reflect.TypeFor[map[string]any]():
 						result.Cookies[key] = &httpext.HTTPRequestCookie{Name: key, Value: "", Replace: false}
 						cookie := cookieV.ToObject(rt)
 						for _, attr := range cookie.Keys() {
@@ -286,7 +349,7 @@ func (c *Client) parseRequest(
 				}
 			case "headers":
 				headersV := params.Get(k)
-				if goja.IsUndefined(headersV) || goja.IsNull(headersV) {
+				if common.IsNullish(headersV) {
 					continue
 				}
 				headers := headersV.ToObject(rt)
@@ -302,11 +365,10 @@ func (c *Client) parseRequest(
 				}
 			case "jar":
 				jarV := params.Get(k)
-				if goja.IsUndefined(jarV) || goja.IsNull(jarV) {
+				if common.IsNullish(jarV) {
 					continue
 				}
-				switch v := jarV.Export().(type) {
-				case *CookieJar:
+				if v, ok := jarV.Export().(*CookieJar); ok {
 					result.ActiveJar = v.Jar
 				}
 			case "compression":
@@ -328,16 +390,8 @@ func (c *Client) parseRequest(
 			case "redirects":
 				result.Redirects = null.IntFrom(params.Get(k).ToInteger())
 			case "tags":
-				tagsV := params.Get(k)
-				if goja.IsUndefined(tagsV) || goja.IsNull(tagsV) {
-					continue
-				}
-				tagObj := tagsV.ToObject(rt)
-				if tagObj == nil {
-					continue
-				}
-				for _, key := range tagObj.Keys() {
-					result.Tags[key] = tagObj.Get(key).String()
+				if err := common.ApplyCustomUserTags(rt, &result.TagsAndMeta, params.Get(k)); err != nil {
+					return nil, fmt.Errorf("invalid HTTP request metric tags: %w", err)
 				}
 			case "auth":
 				result.Auth = params.Get(k).String()
@@ -375,7 +429,7 @@ func (c *Client) parseRequest(
 	return result, nil
 }
 
-func (c *Client) prepareBatchArray(requests []interface{}) (
+func (c *Client) prepareBatchArray(requests []any) (
 	[]httpext.BatchParsedHTTPRequest, []*Response, error,
 ) {
 	reqCount := len(requests)
@@ -387,8 +441,7 @@ func (c *Client) prepareBatchArray(requests []interface{}) (
 		parsedReq, err := c.parseBatchRequest(i, req)
 		if err != nil {
 			resp.Error = err.Error()
-			var k6e httpext.K6Error
-			if errors.As(err, &k6e) {
+			if k6e, ok := errors.AsType[httpext.K6Error](err); ok {
 				resp.ErrorCode = int(k6e.Code)
 			}
 			results[i] = c.responseFromHTTPext(resp)
@@ -404,7 +457,7 @@ func (c *Client) prepareBatchArray(requests []interface{}) (
 	return batchReqs, results, nil
 }
 
-func (c *Client) prepareBatchObject(requests map[string]interface{}) (
+func (c *Client) prepareBatchObject(requests map[string]any) (
 	[]httpext.BatchParsedHTTPRequest, map[string]*Response, error,
 ) {
 	reqCount := len(requests)
@@ -417,8 +470,7 @@ func (c *Client) prepareBatchObject(requests map[string]interface{}) (
 		parsedReq, err := c.parseBatchRequest(key, req)
 		if err != nil {
 			resp.Error = err.Error()
-			var k6e httpext.K6Error
-			if errors.As(err, &k6e) {
+			if k6e, ok := errors.AsType[httpext.K6Error](err); ok {
 				resp.ErrorCode = int(k6e.Code)
 			}
 			results[key] = c.responseFromHTTPext(resp)
@@ -437,7 +489,7 @@ func (c *Client) prepareBatchObject(requests map[string]interface{}) (
 
 // Batch makes multiple simultaneous HTTP requests. The provideds reqsV should be an array of request
 // objects. Batch returns an array of responses and/or error
-func (c *Client) Batch(reqsV ...goja.Value) (interface{}, error) {
+func (c *Client) Batch(reqsV ...sobek.Value) (any, error) {
 	state := c.moduleInstance.vu.State()
 	if state == nil {
 		return nil, ErrBatchForbiddenInInitContext
@@ -451,13 +503,13 @@ func (c *Client) Batch(reqsV ...goja.Value) (interface{}, error) {
 	var (
 		err       error
 		batchReqs []httpext.BatchParsedHTTPRequest
-		results   interface{} // either []*Response or map[string]*Response
+		results   any // either []*Response or map[string]*Response
 	)
 
 	switch v := reqsV[0].Export().(type) {
-	case []interface{}:
+	case []any:
 		batchReqs, results, err = c.prepareBatchArray(v)
-	case map[string]interface{}:
+	case map[string]any:
 		batchReqs, results, err = c.prepareBatchObject(v)
 	default:
 		return nil, fmt.Errorf("invalid http.batch() argument type %T", v)
@@ -475,28 +527,32 @@ func (c *Client) Batch(reqsV ...goja.Value) (interface{}, error) {
 	errs := httpext.MakeBatchRequests(
 		c.moduleInstance.vu.Context(), state, batchReqs, reqCount,
 		int(state.Options.Batch.Int64), int(state.Options.BatchPerHost.Int64),
-		c.processResponse,
 	)
 
-	for i := 0; i < reqCount; i++ {
+	for range reqCount {
 		if e := <-errs; e != nil && err == nil { // Save only the first error
 			err = e
+		}
+	}
+	for _, req := range batchReqs {
+		if req.Response != nil {
+			c.processResponse(req.Response, req.ResponseType)
 		}
 	}
 	return results, err
 }
 
-func (c *Client) parseBatchRequest(key interface{}, val interface{}) (*httpext.ParsedHTTPRequest, error) {
+func (c *Client) parseBatchRequest(key any, val any) (*httpext.ParsedHTTPRequest, error) {
 	var (
 		method       = http.MethodGet
 		ok           bool
-		body, reqURL interface{}
-		params       goja.Value
+		body, reqURL any
+		params       sobek.Value
 		rt           = c.moduleInstance.vu.Runtime()
 	)
 
 	switch data := val.(type) {
-	case []interface{}:
+	case []any:
 		// Handling of ["GET", "http://example.com/"]
 		dataLen := len(data)
 		if dataLen < 2 {
@@ -514,7 +570,7 @@ func (c *Client) parseBatchRequest(key interface{}, val interface{}) (*httpext.P
 			params = rt.ToValue(data[3])
 		}
 
-	case map[string]interface{}:
+	case map[string]any:
 		// Handling of {method: "GET", url: "https://test.k6.io"}
 		if _, ok := data["url"]; !ok {
 			return nil, fmt.Errorf("batch request %v doesn't have a url key", key)
@@ -543,10 +599,9 @@ func (c *Client) parseBatchRequest(key interface{}, val interface{}) (*httpext.P
 	return c.parseRequest(method, reqURL, body, params)
 }
 
-func requestContainsFile(data map[string]interface{}) bool {
+func requestContainsFile(data map[string]any) bool {
 	for _, v := range data {
-		switch v.(type) {
-		case FileData:
+		if _, ok := v.(*FileData); ok {
 			return true
 		}
 	}

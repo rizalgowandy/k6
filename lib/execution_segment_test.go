@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
@@ -51,7 +31,7 @@ func TestExecutionSegmentEquals(t *testing.T) {
 	t.Run("To it's self", func(t *testing.T) {
 		t.Parallel()
 		es := stringToES(t, "1/2:2/3")
-		require.True(t, es.Equal(es))
+		require.True(t, es.Equal(es)) //nolint:gocritic
 	})
 }
 
@@ -107,7 +87,6 @@ func TestExecutionSegmentUnmarshalText(t *testing.T) {
 		// TODO add more strange or not so strange cases
 	}
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.input, func(t *testing.T) {
 			t.Parallel()
 			es := new(ExecutionSegment)
@@ -333,7 +312,6 @@ func TestExecutionSegmentSubSegment(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, testCase.result, testCase.base.SubSegment(testCase.sub))
@@ -376,7 +354,6 @@ func TestSegmentExecutionFloatLength(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.es.String(), func(t *testing.T) {
 			t.Parallel()
 			require.InEpsilon(t, testCase.expected, testCase.es.FloatLength(), 0.001)
@@ -420,7 +397,6 @@ func TestExecutionSegmentStringSequences(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.seq, func(t *testing.T) {
 			t.Parallel()
 			result, err := NewExecutionSegmentSequenceFromString(tc.seq)
@@ -442,6 +418,14 @@ func TestExecutionSegmentStringSequences(t *testing.T) {
 	}
 }
 
+func getTestRand(t testing.TB) *rand.Rand {
+	t.Helper()
+	seed := time.Now().UnixNano()
+	r := rand.New(rand.NewSource(seed))
+	t.Logf("Random source seeded with %d\n", seed)
+	return r
+}
+
 // Return a randomly distributed sequence of n amount of
 // execution segments whose length totals 1.
 func generateRandomSequence(t testing.TB, n, m int64, r *rand.Rand) ExecutionSegmentSequence {
@@ -449,12 +433,12 @@ func generateRandomSequence(t testing.TB, n, m int64, r *rand.Rand) ExecutionSeg
 	ess := ExecutionSegmentSequence(make([]*ExecutionSegment, n))
 	numerators := make([]int64, n)
 	var denominator int64
-	for i := int64(0); i < n; i++ {
+	for i := range n {
 		numerators[i] = 1 + r.Int63n(m)
 		denominator += numerators[i]
 	}
 	from := big.NewRat(0, 1)
-	for i := int64(0); i < n; i++ {
+	for i := range n {
 		to := new(big.Rat).Add(big.NewRat(numerators[i], denominator), from)
 		ess[i], err = NewExecutionSegment(from, to)
 		require.NoError(t, err)
@@ -469,13 +453,11 @@ func generateRandomSequence(t testing.TB, n, m int64, r *rand.Rand) ExecutionSeg
 func TestExecutionSegmentScaleConsistency(t *testing.T) {
 	t.Parallel()
 
-	seed := time.Now().UnixNano()
-	r := rand.New(rand.NewSource(seed))
-	t.Logf("Random source seeded with %d\n", seed)
+	r := getTestRand(t)
 
 	const numTests = 10
-	for i := 0; i < numTests; i++ {
-		scale := rand.Int31n(99) + 2
+	for range numTests {
+		scale := r.Int31n(99) + 2
 		seq := generateRandomSequence(t, r.Int63n(9)+2, 100, r)
 
 		t.Run(fmt.Sprintf("%d_%s", scale, seq), func(t *testing.T) {
@@ -494,13 +476,10 @@ func TestExecutionSegmentScaleConsistency(t *testing.T) {
 func TestExecutionTupleScaleConsistency(t *testing.T) {
 	t.Parallel()
 
-	seed := time.Now().UnixNano()
-	r := rand.New(rand.NewSource(seed))
-	t.Logf("Random source seeded with %d\n", seed)
-
+	r := getTestRand(t)
 	const numTests = 10
-	for i := 0; i < numTests; i++ {
-		scale := rand.Int31n(99) + 2
+	for range numTests {
+		scale := r.Int31n(99) + 2
 		seq := generateRandomSequence(t, r.Int63n(9)+2, 200, r)
 
 		et, err := NewExecutionTuple(seq[0], &seq)
@@ -537,16 +516,14 @@ func TestExecutionSegmentScaleNoWobble(t *testing.T) {
 		requireSegmentScaleGreater(t, et)
 	})
 
-	seed := time.Now().UnixNano()
-	r := rand.New(rand.NewSource(seed))
-	t.Logf("Random source seeded with %d\n", seed)
+	r := getTestRand(t)
 
 	// Random segments
 	const numTests = 10
-	for i := 0; i < numTests; i++ {
+	for range numTests {
 		seq := generateRandomSequence(t, r.Int63n(9)+2, 100, r)
 
-		es := seq[rand.Intn(len(seq))]
+		es := seq[r.Intn(len(seq))]
 
 		et, err := NewExecutionTuple(seq[0], &seq)
 		require.NoError(t, err)
@@ -593,7 +570,6 @@ func TestGetStripedOffsets(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(fmt.Sprintf("seq:%s;segment:%s", tc.seq, tc.seg), func(t *testing.T) {
 			t.Parallel()
 			ess, err := NewExecutionSegmentSequenceFromString(tc.seq)
@@ -630,7 +606,6 @@ func TestSequenceLCD(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(fmt.Sprintf("seq:%s", tc.seq), func(t *testing.T) {
 			t.Parallel()
 			ess, err := NewExecutionSegmentSequenceFromString(tc.seq)
@@ -646,7 +621,6 @@ func BenchmarkGetStripedOffsets(b *testing.B) {
 	r := rand.New(rand.NewSource(seed))
 
 	for _, length := range lengths {
-		length := length
 		b.Run(fmt.Sprintf("length%d,seed%d", length, seed), func(b *testing.B) {
 			sequence := generateRandomSequence(b, length, 100, r)
 			b.ResetTimer()
@@ -667,7 +641,7 @@ func BenchmarkGetStripedOffsetsEven(b *testing.B) {
 		ess := ExecutionSegmentSequence(make([]*ExecutionSegment, n))
 		numerators := make([]int64, n)
 		var denominator int64
-		for i := int64(0); i < n; i++ {
+		for i := range n {
 			numerators[i] = 1 // nice and simple :)
 			denominator += numerators[i]
 		}
@@ -682,7 +656,6 @@ func BenchmarkGetStripedOffsetsEven(b *testing.B) {
 	}
 
 	for _, length := range lengths {
-		length := length
 		b.Run(fmt.Sprintf("length%d", length), func(b *testing.B) {
 			sequence := generateSequence(length)
 			b.ResetTimer()
@@ -710,7 +683,6 @@ func TestGetNewExecutionTupleBesedOnValue(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(fmt.Sprintf("seq:%s;segment:%s", tc.seq, tc.seg), func(t *testing.T) {
 			t.Parallel()
 			ess, err := NewExecutionSegmentSequenceFromString(tc.seq)
@@ -867,7 +839,6 @@ func TestNewExecutionTuple(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(fmt.Sprintf("seg:'%s',seq:'%s'", testCase.seg, testCase.seq), func(t *testing.T) {
 			t.Parallel()
 			et, err := NewExecutionTuple(testCase.seg, testCase.seq)
@@ -907,7 +878,6 @@ func BenchmarkExecutionSegmentScale(b *testing.B) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		b.Run(fmt.Sprintf("seq:%s;segment:%s", tc.seq, tc.seg), func(b *testing.B) {
 			ess, err := NewExecutionSegmentSequenceFromString(tc.seq)
 			require.NoError(b, err)
@@ -919,7 +889,6 @@ func BenchmarkExecutionSegmentScale(b *testing.B) {
 			et, err := NewExecutionTuple(segment, &ess)
 			require.NoError(b, err)
 			for _, value := range []int64{5, 5523, 5000000, 67280421310721} {
-				value := value
 				b.Run(fmt.Sprintf("segment.Scale(%d)", value), func(b *testing.B) {
 					for i := 0; i < b.N; i++ {
 						segment.Scale(value)

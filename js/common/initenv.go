@@ -1,44 +1,21 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package common
 
 import (
 	"net/url"
 	"path/filepath"
 
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/lib/fsext"
 )
 
 // InitEnvironment contains properties that can be accessed by Go code executed
 // in the k6 init context. It can be accessed by calling common.GetInitEnv().
 type InitEnvironment struct {
-	Logger      logrus.FieldLogger
-	FileSystems map[string]afero.Fs
+	*lib.TestPreInitState
+	FileSystems map[string]fsext.Fs
 	CWD         *url.URL
-	Registry    *metrics.Registry
-	// TODO: add RuntimeOptions and other properties, goja sources, etc.
-	// ideally, we should leave this as the only data structure necessary for
-	// executing the init context for all JS modules
+	// TODO: get rid of this type altogether? we won't need it if we figure out
+	// how to handle .tar archive vs regular JS script differences in FileSystems
 }
 
 // GetAbsFilePath should be used to access the FileSystems, since afero has a
@@ -57,8 +34,8 @@ func (ie *InitEnvironment) GetAbsFilePath(filename string) string {
 		filename = filepath.Join(ie.CWD.Path, filename)
 	}
 	filename = filepath.Clean(filename)
-	if filename[0:1] != afero.FilePathSeparator {
-		filename = afero.FilePathSeparator + filename
+	if filename[0:1] != fsext.FilePathSeparator {
+		filename = fsext.FilePathSeparator + filename
 	}
 	return filename
 }

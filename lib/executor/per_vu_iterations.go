@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -30,10 +10,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/ui/pb"
+	"go.k6.io/k6/v2/internal/ui/pb"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/lib/types"
+	"go.k6.io/k6/v2/metrics"
 )
 
 const perVUIterationsType = "per-vu-iterations"
@@ -116,7 +96,7 @@ func (pvic PerVUIterationsConfig) GetExecutionRequirements(et *lib.ExecutionTupl
 	return []lib.ExecutionStep{
 		{
 			TimeOffset: 0,
-			PlannedVUs: uint64(pvic.GetVUs(et)),
+			PlannedVUs: uint64(pvic.GetVUs(et)), //nolint:gosec
 		},
 		{
 			TimeOffset: pvic.MaxDuration.TimeDuration() + pvic.GracefulStop.TimeDuration(),
@@ -150,7 +130,8 @@ type PerVUIterations struct {
 var _ lib.Executor = &PerVUIterations{}
 
 // Run executes a specific number of iterations with each configured VU.
-// nolint:funlen
+//
+//nolint:funlen
 func (pvi PerVUIterations) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	numVUs := pvi.config.GetVUs(pvi.executionState.ExecutionTuple)
 	iterations := pvi.config.GetIterations()
@@ -158,9 +139,10 @@ func (pvi PerVUIterations) Run(parentCtx context.Context, out chan<- metrics.Sam
 	gracefulStop := pvi.config.GetGracefulStop()
 
 	waitOnProgressChannel := make(chan struct{})
-	startTime, maxDurationCtx, regDurationCtx, cancel := getDurationContexts(parentCtx, duration, gracefulStop)
+	startTime, maxDurationCtx, regDurationCtx, cancel, regCancel := getDurationContexts(parentCtx, duration, gracefulStop)
 	defer func() {
 		cancel()
+		regCancel()
 		<-waitOnProgressChannel
 	}()
 
@@ -169,11 +151,11 @@ func (pvi PerVUIterations) Run(parentCtx context.Context, out chan<- metrics.Sam
 		"vus": numVUs, "iterations": iterations, "maxDuration": duration, "type": pvi.config.GetType(),
 	}).Debug("Starting executor run...")
 
-	totalIters := uint64(numVUs * iterations)
+	totalIters := numVUs * iterations
 	doneIters := new(uint64)
 
 	vusFmt := pb.GetFixedLengthIntFormat(numVUs)
-	itersFmt := pb.GetFixedLengthIntFormat(int64(totalIters))
+	itersFmt := pb.GetFixedLengthIntFormat(totalIters)
 	progressFn := func() (float64, []string) {
 		spent := time.Since(startTime)
 		progVUs := fmt.Sprintf(vusFmt+" VUs", numVUs)
@@ -218,7 +200,7 @@ func (pvi PerVUIterations) Run(parentCtx context.Context, out chan<- metrics.Sam
 		activeVUs.Done()
 	}
 
-	droppedIterationMetric := pvi.executionState.BuiltinMetrics.DroppedIterations
+	droppedIterationMetric := pvi.executionState.Test.BuiltinMetrics.DroppedIterations
 	handleVU := func(initVU lib.InitializedVU) {
 		defer handleVUsWG.Done()
 		ctx, cancel := context.WithCancel(maxDurationCtx)
@@ -229,12 +211,16 @@ func (pvi PerVUIterations) Run(parentCtx context.Context, out chan<- metrics.Sam
 			getVUActivationParams(ctx, pvi.config.BaseConfig, returnVU,
 				pvi.nextIterationCounters))
 
-		for i := int64(0); i < iterations; i++ {
+		for i := range iterations {
 			select {
 			case <-regDurationDone:
 				metrics.PushIfNotDone(parentCtx, out, metrics.Sample{
-					Value: float64(iterations - i), Metric: droppedIterationMetric,
-					Tags: pvi.getMetricTags(&vuID), Time: time.Now(),
+					TimeSeries: metrics.TimeSeries{
+						Metric: droppedIterationMetric,
+						Tags:   pvi.getMetricTags(&vuID),
+					},
+					Time:  time.Now(),
+					Value: float64(iterations - i),
 				})
 				return // don't make more iterations
 			default:
@@ -245,7 +231,7 @@ func (pvi PerVUIterations) Run(parentCtx context.Context, out chan<- metrics.Sam
 		}
 	}
 
-	for i := int64(0); i < numVUs; i++ {
+	for range numVUs {
 		initializedVU, err := pvi.executionState.GetPlannedVU(pvi.logger, true)
 		if err != nil {
 			cancel()

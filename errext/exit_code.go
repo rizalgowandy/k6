@@ -1,29 +1,9 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package errext
 
 import (
 	"errors"
 
-	"go.k6.io/k6/errext/exitcodes"
+	"go.k6.io/k6/v2/errext/exitcodes"
 )
 
 // ExitCode is the code with which the application should exit if this error
@@ -45,25 +25,24 @@ func WithExitCodeIfNone(err error, exitCode exitcodes.ExitCode) error {
 		// No error, do nothing
 		return nil
 	}
-	var ecerr HasExitCode
-	if errors.As(err, &ecerr) {
+	if _, ok := errors.AsType[HasExitCode](err); ok {
 		// The given error already has an exit code, do nothing
 		return err
 	}
-	return withExitCode{err, exitCode}
+	return withExitCodeError{err, exitCode}
 }
 
-type withExitCode struct {
+type withExitCodeError struct {
 	error
 	exitCode exitcodes.ExitCode
 }
 
-func (wh withExitCode) Unwrap() error {
+func (wh withExitCodeError) Unwrap() error {
 	return wh.error
 }
 
-func (wh withExitCode) ExitCode() exitcodes.ExitCode {
+func (wh withExitCodeError) ExitCode() exitcodes.ExitCode {
 	return wh.exitCode
 }
 
-var _ HasExitCode = withExitCode{}
+var _ HasExitCode = withExitCodeError{}

@@ -1,34 +1,14 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -36,30 +16,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/afero"
-
-	"go.k6.io/k6/lib/fsext"
-	"go.k6.io/k6/loader"
+	"go.k6.io/k6/v2/internal/loader"
+	"go.k6.io/k6/v2/lib/fsext"
 )
 
-//nolint: gochecknoglobals, lll
 var (
-	volumeRE  = regexp.MustCompile(`^[/\\]?([a-zA-Z]):(.*)`)
-	sharedRE  = regexp.MustCompile(`^\\\\([^\\]+)`) // matches a shared folder in Windows before backslack replacement. i.e \\VMBOXSVR\k6\script.js
+	volumeRE = regexp.MustCompile(`^[/\\]?([a-zA-Z]):(.*)`)
+	// matches a shared folder in Windows before backslack replacement. i.e \\VMBOXSVR\k6\script.js
+	sharedRE  = regexp.MustCompile(`^\\\\([^\\]+)`)
 	homeDirRE = regexp.MustCompile(`(?i)^(/[a-zA-Z])?/(Users|home|Documents and Settings)/(?:[^/]+)`)
 )
 
-// NormalizeAndAnonymizePath Normalizes (to use a / path separator) and anonymizes a file path, by scrubbing usernames from home directories.
+// NormalizeAndAnonymizePath Normalizes (to use a / path separator) and anonymizes a file path,
+// by scrubbing usernames from home directories.
 func NormalizeAndAnonymizePath(path string) string {
 	path = filepath.Clean(path)
 
 	p := volumeRE.ReplaceAllString(path, `/$1$2`)
 	p = sharedRE.ReplaceAllString(p, `/nobody`)
-	p = strings.Replace(p, "\\", "/", -1)
+	p = strings.ReplaceAll(p, "\\", "/")
 	return homeDirRE.ReplaceAllString(p, `$1/$2/nobody`)
 }
 
-func newNormalizedFs(fs afero.Fs) afero.Fs {
+func newNormalizedFs(fs fsext.Fs) fsext.Fs {
 	return fsext.NewChangePathFs(fs, fsext.ChangePathFunc(func(name string) (string, error) {
 		return NormalizeAndAnonymizePath(name), nil
 	}))
@@ -81,10 +60,10 @@ type Archive struct {
 	Data        []byte   `json:"-"`
 
 	// Working directory for resolving relative paths.
-	Pwd    string   `json:"pwd"` // only for json
+	Pwd    string   `json:"pwd"`
 	PwdURL *url.URL `json:"-"`
 
-	Filesystems map[string]afero.Fs `json:"-"`
+	Filesystems map[string]fsext.Fs `json:"-"`
 
 	// Environment variables
 	Env map[string]string `json:"env"`
@@ -93,12 +72,17 @@ type Archive struct {
 
 	K6Version string `json:"k6version"`
 	Goos      string `json:"goos"`
+
+	// Dependencies contains the script's declared build dependencies before any manifest overrides.
+	// Keys are dependency names (e.g. "k6", "k6/x/sql"), values are semver constraint strings
+	// or "*" for unconstrained. This field is omitted for archives created by older k6 versions.
+	Dependencies map[string]string `json:"dependencies,omitempty"`
 }
 
-func (arc *Archive) getFs(name string) afero.Fs {
+func (arc *Archive) getFs(name string) fsext.Fs {
 	fs, ok := arc.Filesystems[name]
 	if !ok {
-		fs = afero.NewMemMapFs()
+		fs = fsext.NewMemMapFs()
 		if name == "file" {
 			fs = newNormalizedFs(fs)
 		}
@@ -130,25 +114,27 @@ func (arc *Archive) loadMetadataJSON(data []byte) (err error) {
 }
 
 // ReadArchive reads an archive created by Archive.Write from a reader.
+//
+//nolint:gocognit
 func ReadArchive(in io.Reader) (*Archive, error) {
 	r := tar.NewReader(in)
-	arc := &Archive{Filesystems: make(map[string]afero.Fs, 2)}
+	arc := &Archive{Filesystems: make(map[string]fsext.Fs, 2)}
 	// initialize both fses
 	_ = arc.getFs("https")
 	_ = arc.getFs("file")
 	for {
 		hdr, err := r.Next()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return nil, err
 		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA { //nolint:staticcheck
 			continue
 		}
 
-		data, err := ioutil.ReadAll(r)
+		data, err := io.ReadAll(r)
 		if err != nil {
 			return nil, err
 		}
@@ -183,14 +169,12 @@ func ReadArchive(in io.Reader) (*Archive, error) {
 			}
 			fallthrough
 		case "https", "file":
-			fs := arc.getFs(pfx)
+			fileSystem := arc.getFs(pfx)
 			name = filepath.FromSlash(name)
-			err = afero.WriteFile(fs, name, data, os.FileMode(hdr.Mode))
-			if err != nil {
+			if err = fsext.WriteFile(fileSystem, name, data, fs.FileMode(hdr.Mode)); err != nil { //nolint:gosec
 				return nil, err
 			}
-			err = fs.Chtimes(name, hdr.AccessTime, hdr.ModTime)
-			if err != nil {
+			if err = fileSystem.Chtimes(name, hdr.AccessTime, hdr.ModTime); err != nil {
 				return nil, err
 			}
 		default:
@@ -203,7 +187,7 @@ func ReadArchive(in io.Reader) (*Archive, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = afero.WriteFile(arc.getFs(scheme), pathOnFs, arc.Data, 0o644) // TODO fix the mode ?
+	err = fsext.WriteFile(arc.getFs(scheme), pathOnFs, arc.Data, 0o644) // TODO fix the mode ?
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +226,8 @@ func getURLtoString(u *url.URL) string {
 // The format should be treated as opaque; currently it is simply a TAR rollup, but this may
 // change. If it does change, ReadArchive must be able to handle all previous formats as well as
 // the current one.
+//
+//nolint:funlen,gocognit
 func (arc *Archive) Write(out io.Writer) error {
 	w := tar.NewWriter(out)
 
@@ -299,10 +285,10 @@ func (arc *Archive) Write(out io.Writer) error {
 		//   anonymize paths before stuffing them in a shareable archive.
 		foundDirs := make(map[string]bool)
 		paths := make([]string, 0, 10)
-		infos := make(map[string]os.FileInfo) // ... fix this ?
+		infos := make(map[string]fs.FileInfo) // ... fix this ?
 		files := make(map[string][]byte)
 
-		walkFunc := filepath.WalkFunc(func(filePath string, info os.FileInfo, err error) error {
+		walkFunc := filepath.WalkFunc(func(filePath string, info fs.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -315,11 +301,11 @@ func (arc *Archive) Write(out io.Writer) error {
 			}
 
 			paths = append(paths, normalizedPath)
-			files[normalizedPath], err = afero.ReadFile(filesystem, filePath)
+			files[normalizedPath], err = fsext.ReadFile(filesystem, filePath)
 			return err
 		})
 
-		if err = fsext.Walk(filesystem, afero.FilePathSeparator, walkFunc); err != nil {
+		if err = fsext.Walk(filesystem, fsext.FilePathSeparator, walkFunc); err != nil {
 			return err
 		}
 		if len(files) == 0 {
@@ -387,7 +373,7 @@ func (arc *Archive) json() ([]byte, error) {
 	// this prevents <, >, and & from being escaped in JSON strings
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(arc); err != nil {
+	if err := encoder.Encode(arc); err != nil { //nolint:gosec // pwd is not a password
 		return nil, err
 	}
 

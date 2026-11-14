@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package errext
 
 import "errors"
@@ -38,22 +18,21 @@ func WithHint(err error, hint string) error {
 	if err == nil {
 		return nil // No error, do nothing
 	}
-	return withHint{err, hint}
+	return withHintError{err, hint}
 }
 
-type withHint struct {
+type withHintError struct {
 	error
 	hint string
 }
 
-func (wh withHint) Unwrap() error {
+func (wh withHintError) Unwrap() error {
 	return wh.error
 }
 
-func (wh withHint) Hint() string {
+func (wh withHintError) Hint() string {
 	hint := wh.hint
-	var oldhint HasHint
-	if errors.As(wh.error, &oldhint) {
+	if oldhint, ok := errors.AsType[HasHint](wh.error); ok {
 		// The given error already had a hint, wrap it
 		hint = hint + " (" + oldhint.Hint() + ")"
 	}
@@ -61,4 +40,4 @@ func (wh withHint) Hint() string {
 	return hint
 }
 
-var _ HasHint = withHint{}
+var _ HasHint = withHintError{}

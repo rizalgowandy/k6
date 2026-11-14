@@ -1,28 +1,7 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package fsext
 
 import (
-	"errors"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,7 +38,7 @@ type ChangePathFunc func(name string) (path string, err error)
 func NewTrimFilePathSeparatorFs(source afero.Fs) *ChangePathFs {
 	return &ChangePathFs{source: source, fn: ChangePathFunc(func(name string) (path string, err error) {
 		if !strings.HasPrefix(name, afero.FilePathSeparator) {
-			return name, os.ErrNotExist
+			return name, fs.ErrNotExist
 		}
 
 		return filepath.Clean(strings.TrimPrefix(name, afero.FilePathSeparator)), nil
@@ -72,24 +51,24 @@ func (f *ChangePathFile) Name() string {
 }
 
 // Chown changes the uid and gid of the named file.
-func (b *ChangePathFs) Chown(name string, uid, gid int) error {
-	return errors.New("unimplemented Chown")
+func (b *ChangePathFs) Chown(_ string, _, _ int) error {
+	panic("unimplemented Chown")
 }
 
 // Chtimes changes the access and modification times of the named file
 func (b *ChangePathFs) Chtimes(name string, atime, mtime time.Time) (err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return &os.PathError{Op: "chtimes", Path: name, Err: err}
+		return &fs.PathError{Op: "chtimes", Path: name, Err: err}
 	}
 	return b.source.Chtimes(newName, atime, mtime)
 }
 
 // Chmod changes the mode of the named file to mode.
-func (b *ChangePathFs) Chmod(name string, mode os.FileMode) (err error) {
+func (b *ChangePathFs) Chmod(name string, mode fs.FileMode) (err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return &os.PathError{Op: "chmod", Path: name, Err: err}
+		return &fs.PathError{Op: "chmod", Path: name, Err: err}
 	}
 	return b.source.Chmod(newName, mode)
 }
@@ -101,10 +80,10 @@ func (b *ChangePathFs) Name() string {
 
 // Stat returns a FileInfo describing the named file, or an error, if any
 // happens.
-func (b *ChangePathFs) Stat(name string) (fi os.FileInfo, err error) {
+func (b *ChangePathFs) Stat(name string) (fi fs.FileInfo, err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return nil, &os.PathError{Op: "stat", Path: name, Err: err}
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
 	}
 	return b.source.Stat(newName)
 }
@@ -113,10 +92,10 @@ func (b *ChangePathFs) Stat(name string) (fi os.FileInfo, err error) {
 func (b *ChangePathFs) Rename(oldName, newName string) (err error) {
 	var newOldName, newNewName string
 	if newOldName, err = b.fn(oldName); err != nil {
-		return &os.PathError{Op: "rename", Path: oldName, Err: err}
+		return &fs.PathError{Op: "rename", Path: oldName, Err: err}
 	}
 	if newNewName, err = b.fn(newName); err != nil {
-		return &os.PathError{Op: "rename", Path: newName, Err: err}
+		return &fs.PathError{Op: "rename", Path: newName, Err: err}
 	}
 	return b.source.Rename(newOldName, newNewName)
 }
@@ -126,7 +105,7 @@ func (b *ChangePathFs) Rename(oldName, newName string) (err error) {
 func (b *ChangePathFs) RemoveAll(name string) (err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return &os.PathError{Op: "remove_all", Path: name, Err: err}
+		return &fs.PathError{Op: "remove_all", Path: name, Err: err}
 	}
 	return b.source.RemoveAll(newName)
 }
@@ -136,16 +115,16 @@ func (b *ChangePathFs) RemoveAll(name string) (err error) {
 func (b *ChangePathFs) Remove(name string) (err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return &os.PathError{Op: "remove", Path: name, Err: err}
+		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 	return b.source.Remove(newName)
 }
 
 // OpenFile opens a file using the given flags and the given mode.
-func (b *ChangePathFs) OpenFile(name string, flag int, mode os.FileMode) (f afero.File, err error) {
+func (b *ChangePathFs) OpenFile(name string, flag int, mode fs.FileMode) (f afero.File, err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return nil, &os.PathError{Op: "openfile", Path: name, Err: err}
+		return nil, &fs.PathError{Op: "openfile", Path: name, Err: err}
 	}
 	sourcef, err := b.source.OpenFile(newName, flag, mode)
 	if err != nil {
@@ -158,7 +137,7 @@ func (b *ChangePathFs) OpenFile(name string, flag int, mode os.FileMode) (f afer
 func (b *ChangePathFs) Open(name string) (f afero.File, err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return nil, &os.PathError{Op: "open", Path: name, Err: err}
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
 	sourcef, err := b.source.Open(newName)
 	if err != nil {
@@ -169,20 +148,20 @@ func (b *ChangePathFs) Open(name string) (f afero.File, err error) {
 
 // Mkdir creates a directory in the filesystem, return an error if any
 // happens.
-func (b *ChangePathFs) Mkdir(name string, mode os.FileMode) (err error) {
+func (b *ChangePathFs) Mkdir(name string, mode fs.FileMode) (err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return &os.PathError{Op: "mkdir", Path: name, Err: err}
+		return &fs.PathError{Op: "mkdir", Path: name, Err: err}
 	}
 	return b.source.Mkdir(newName, mode)
 }
 
 // MkdirAll creates a directory path and all parents that does not exist
 // yet.
-func (b *ChangePathFs) MkdirAll(name string, mode os.FileMode) (err error) {
+func (b *ChangePathFs) MkdirAll(name string, mode fs.FileMode) (err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return &os.PathError{Op: "mkdir", Path: name, Err: err}
+		return &fs.PathError{Op: "mkdir", Path: name, Err: err}
 	}
 	return b.source.MkdirAll(newName, mode)
 }
@@ -192,7 +171,7 @@ func (b *ChangePathFs) MkdirAll(name string, mode os.FileMode) (err error) {
 func (b *ChangePathFs) Create(name string) (f afero.File, err error) {
 	var newName string
 	if newName, err = b.fn(name); err != nil {
-		return nil, &os.PathError{Op: "create", Path: name, Err: err}
+		return nil, &fs.PathError{Op: "create", Path: name, Err: err}
 	}
 	sourcef, err := b.source.Create(newName)
 	if err != nil {
@@ -202,11 +181,11 @@ func (b *ChangePathFs) Create(name string) (f afero.File, err error) {
 }
 
 // LstatIfPossible implements the afero.Lstater interface
-func (b *ChangePathFs) LstatIfPossible(name string) (os.FileInfo, bool, error) {
+func (b *ChangePathFs) LstatIfPossible(name string) (fs.FileInfo, bool, error) {
 	var newName string
 	newName, err := b.fn(name)
 	if err != nil {
-		return nil, false, &os.PathError{Op: "lstat", Path: name, Err: err}
+		return nil, false, &fs.PathError{Op: "lstat", Path: name, Err: err}
 	}
 	if lstater, ok := b.source.(afero.Lstater); ok {
 		return lstater.LstatIfPossible(newName)

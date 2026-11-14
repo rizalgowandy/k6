@@ -2,7 +2,7 @@
 set -eEuo pipefail
 
 # External dependencies:
-# - https://github.com/rpm-software-management/createrepo
+# - https://github.com/rpm-software-management/createrepo_c
 # - https://github.com/s3tools/s3cmd
 #   s3cmd expects AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to be set in the
 #   environment.
@@ -13,7 +13,7 @@ set -eEuo pipefail
 #   For generating the index.html of each directory. It's available in the
 #   packaging/bin directory of the k6 repo, and should be in $PATH.
 
-_s3bucket="${S3_BUCKET-dl.k6.io}"
+_s3bucket="${S3_BUCKET}"
 _usage="Usage: $0 <pkgdir> <repodir> [s3bucket=${_s3bucket}]"
 PKGDIR="${1?${_usage}}"  # The directory where .rpm files are located
 REPODIR="${2?${_usage}}" # The package repository working directory
@@ -34,7 +34,9 @@ sync_to_s3() {
   s3cmd sync --delete-removed "${REPODIR}/" "s3://${S3PATH}/"
 
   # Set a short cache expiration for index and repo metadata files.
-  s3cmd modify --recursive --exclude='*' \
+  # We set --acl-private since we manage ACLs ourselves and don't want
+  # s3cmd to modify them. Otherwise, we receive AccessControlListNotSupported.
+  s3cmd modify --acl-private --recursive --exclude='*' \
     --include='index.html' --include='/repodata/*' \
     --add-header='Cache-Control: max-age=60,must-revalidate' "s3://${S3PATH}/"
 }
@@ -75,7 +77,7 @@ for arch in $architectures; do
     cp -av "$f" "$PWD/"
     rpm --addsign "${f##*/}"
   done
-  createrepo .
+  createrepo_c .
   cd -
 
   delete_old_pkgs "$arch"

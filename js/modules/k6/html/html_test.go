@@ -1,36 +1,17 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package html
 
 import (
 	"context"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.k6.io/k6/js/common"
-	"go.k6.io/k6/js/modulestest"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/js/common"
+	"go.k6.io/k6/v2/js/modulestest"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
 const testHTML = `
@@ -85,8 +66,8 @@ const testXML = `
 </ListAllMyBucketsResult>
 `
 
-func getTestModuleInstance(t testing.TB) (*goja.Runtime, *ModuleInstance) {
-	rt := goja.New()
+func getTestModuleInstance(t testing.TB) (*sobek.Runtime, *ModuleInstance) {
+	rt := sobek.New()
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,7 +77,9 @@ func getTestModuleInstance(t testing.TB) (*goja.Runtime, *ModuleInstance) {
 	mockVU := &modulestest.VU{
 		RuntimeField: rt,
 		InitEnvField: &common.InitEnvironment{
-			Registry: metrics.NewRegistry(),
+			TestPreInitState: &lib.TestPreInitState{
+				Registry: metrics.NewRegistry(),
+			},
 		},
 		CtxField:   ctx,
 		StateField: nil,
@@ -109,7 +92,7 @@ func getTestModuleInstance(t testing.TB) (*goja.Runtime, *ModuleInstance) {
 	return rt, mi
 }
 
-func getTestRuntimeAndModuleInstanceWithDoc(t testing.TB, html string) (*goja.Runtime, *ModuleInstance) {
+func getTestRuntimeAndModuleInstanceWithDoc(t testing.TB, html string) (*sobek.Runtime, *ModuleInstance) {
 	t.Helper()
 
 	rt, mi := getTestModuleInstance(t)
@@ -123,7 +106,7 @@ func getTestRuntimeAndModuleInstanceWithDoc(t testing.TB, html string) (*goja.Ru
 	return rt, mi
 }
 
-func getTestRuntimeWithDoc(t testing.TB, html string) *goja.Runtime {
+func getTestRuntimeWithDoc(t testing.TB, html string) *sobek.Runtime {
 	t.Helper()
 
 	rt, _ := getTestRuntimeAndModuleInstanceWithDoc(t, html)
@@ -144,6 +127,47 @@ func TestParseHTML(t *testing.T) {
 			assert.Equal(t, 1, sel.Length())
 			assert.Equal(t, "Lorem ipsum", sel.Text())
 		}
+	})
+	t.Run("Single", func(t *testing.T) {
+		t.Parallel()
+		rt := getTestRuntimeWithDoc(t, testHTML)
+
+		t.Run("returns first matching descendant", func(t *testing.T) {
+			v, err := rt.RunString(`doc.single("p")`)
+			if assert.NoError(t, err) && assert.IsType(t, Selection{}, v.Export()) {
+				sel := v.Export().(Selection).sel
+				assert.Equal(t, 1, sel.Length())
+				text := sel.Text()
+				require.GreaterOrEqual(t, len(text), 17)
+				assert.Equal(t, "Lorem ipsum dolor", text[:17])
+			}
+		})
+		t.Run("supports chaining from a selection", func(t *testing.T) {
+			v, err := rt.RunString(`doc.find("body").single("option").text()`)
+			if assert.NoError(t, err) {
+				assert.Equal(t, "no", v.Export())
+			}
+		})
+		t.Run("returns one overall match for multiple receiver nodes", func(t *testing.T) {
+			v, err := rt.RunString(`doc.find("select").single("option")`)
+			if assert.NoError(t, err) && assert.IsType(t, Selection{}, v.Export()) {
+				sel := v.Export().(Selection).sel
+				assert.Equal(t, 1, sel.Length())
+				assert.Equal(t, "no", sel.Text())
+			}
+		})
+		t.Run("preserves end semantics", func(t *testing.T) {
+			v, err := rt.RunString(`doc.find("select").single("option").end().first().attr("id")`)
+			if assert.NoError(t, err) {
+				assert.Equal(t, "select_one", v.Export())
+			}
+		})
+		t.Run("returns empty selection when no nodes match", func(t *testing.T) {
+			v, err := rt.RunString(`doc.single(".missing").size()`)
+			if assert.NoError(t, err) {
+				assert.Equal(t, int64(0), v.Export())
+			}
+		})
 	})
 	t.Run("Add", func(t *testing.T) {
 		t.Parallel()
@@ -192,7 +216,7 @@ func TestParseHTML(t *testing.T) {
 		t.Run("Unset", func(t *testing.T) {
 			v, err := rt.RunString(`doc.find("h1").attr("class")`)
 			if assert.NoError(t, err) {
-				assert.True(t, goja.IsUndefined(v), "v is not undefined: %v", v)
+				assert.True(t, sobek.IsUndefined(v), "v is not undefined: %v", v)
 			}
 
 			t.Run("Default", func(t *testing.T) {
@@ -313,7 +337,7 @@ func TestParseHTML(t *testing.T) {
 		t.Run("Invalid arg", func(t *testing.T) {
 			_, err := rt.RunString(`doc.find("#select_multi option").each("");`)
 			if assert.Error(t, err) {
-				assert.IsType(t, &goja.Exception{}, err)
+				assert.IsType(t, &sobek.Exception{}, err)
 				assert.Contains(t, err.Error(), "must be a function")
 			}
 		})
@@ -421,6 +445,20 @@ func TestParseHTML(t *testing.T) {
 			}
 		})
 	})
+	t.Run("Empty results are arrays", func(t *testing.T) {
+		t.Parallel()
+		rt := getTestRuntimeWithDoc(t, testHTML)
+
+		for _, script := range []string{
+			`doc.find("#missing").map(function(idx, val) { return val.text() })`,
+			`doc.find("#missing").get()`,
+			`doc.find("h1").get(0).classList()`,
+		} {
+			v, err := rt.RunString("Array.isArray(" + script + ")")
+			require.NoError(t, err, script)
+			assert.True(t, v.ToBoolean(), script)
+		}
+	})
 	t.Run("Map", func(t *testing.T) {
 		t.Parallel()
 		rt := getTestRuntimeWithDoc(t, testHTML)
@@ -428,7 +466,7 @@ func TestParseHTML(t *testing.T) {
 		t.Run("Valid", func(t *testing.T) {
 			v, err := rt.RunString(`doc.find("#select_multi option").map(function(idx, val) { return val.text() })`)
 			if assert.NoError(t, err) {
-				mapped, ok := v.Export().([]goja.Value)
+				mapped, ok := v.Export().([]sobek.Value)
 				assert.True(t, ok)
 				assert.Equal(t, 3, len(mapped))
 				assert.Equal(t, "option 1", mapped[0].String())
@@ -440,10 +478,10 @@ func TestParseHTML(t *testing.T) {
 			_, err := rt.RunString(`
 				const values = doc
 					.find("#select_multi option")
-					.map(function(idx, val) { 
+					.map(function(idx, val) {
 						return val.text()
 					})
-				
+
 				if (values.length !== 3) {
 					throw new Error('Expected 3 values, got ' + values.length)
 				}
@@ -464,14 +502,14 @@ func TestParseHTML(t *testing.T) {
 		t.Run("Invalid arg", func(t *testing.T) {
 			_, err := rt.RunString(`doc.find("#select_multi option").map("");`)
 			if assert.Error(t, err) {
-				assert.IsType(t, &goja.Exception{}, err)
+				assert.IsType(t, &sobek.Exception{}, err)
 				assert.Contains(t, err.Error(), "must be a function")
 			}
 		})
 		t.Run("Map with attr must return string", func(t *testing.T) {
 			v, err := rt.RunString(`doc.find("#select_multi").map(function(idx, val) { return val.attr("name") })`)
 			if assert.NoError(t, err) {
-				mapped, ok := v.Export().([]goja.Value)
+				mapped, ok := v.Export().([]sobek.Value)
 				assert.True(t, ok)
 				assert.Equal(t, 1, len(mapped))
 				assert.Equal(t, "select_multi", mapped[0].String())
@@ -497,25 +535,25 @@ func TestParseHTML(t *testing.T) {
 					})
 					return bucketObj
 				})
-		
+
 			if (buckets.length !== 2) {
 				throw new Error('Expected 2 buckets, got ' + buckets.length)
 			}
-		
+
 			if (buckets[0].name !== 'firstBucket') {
 				throw new Error('Expected bucket name to be "firstBucket", got ' + buckets[0].name)
 			}
-		
+
 			if (buckets[0].creationDate !== 1654852823) {
 				throw new Error(
 					'Expected bucket creation date to be 1654852823, got ' + buckets[0].creationDate
 				)
 			}
-		
+
 			if (buckets[1].name != 'secondBucket') {
 				throw new Error('Expected bucket name to be "secondBucket", got ' + buckets[1].name)
 			}
-		
+
 			if (buckets[1].creationDate !== 1654852825) {
 				throw new Error(
 					'Expected bucket creation date to be 1654852825, got ' + buckets[1].creationDate
@@ -830,7 +868,7 @@ func TestParseHTML(t *testing.T) {
 		t.Run("No args", func(t *testing.T) {
 			v, err := rt.RunString(`doc.find("body").children().get()`)
 			if assert.NoError(t, err) {
-				elems, ok := v.Export().([]goja.Value)
+				elems, ok := v.Export().([]sobek.Value)
 
 				assert.True(t, ok)
 				assert.Equal(t, "h1", elems[0].Export().(Element).NodeName())
@@ -842,7 +880,7 @@ func TestParseHTML(t *testing.T) {
 			v, err := rt.RunString(`doc.find("body").children().get(1)`)
 			if assert.NoError(t, err) {
 				elem, _ := v.Export().(Element)
-				assert.Contains(t, elem.InnerHTML(), "Lorem ipsum dolor sit amet")
+				assert.Contains(t, elem.InnerHTML().Export(), "Lorem ipsum dolor sit amet")
 			}
 		})
 		t.Run("-ve index", func(t *testing.T) {
@@ -929,7 +967,7 @@ func TestParseHTML(t *testing.T) {
 		t.Run("dataset", func(t *testing.T) {
 			v, err := rt.RunString(`doc.find("h1").data()`)
 			if assert.NoError(t, err) {
-				data, ok := v.Export().(map[string]interface{})
+				data, ok := v.Export().(map[string]any)
 
 				assert.True(t, ok)
 				assert.Equal(t, "dataval", data["test"])

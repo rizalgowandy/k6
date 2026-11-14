@@ -1,11 +1,17 @@
-//go:build !amd64 || appengine || !gc || noasm
-// +build !amd64 appengine !gc noasm
+//go:build (!amd64 && !arm64) || !gc || noasm
 
 package zstd
 
 import (
 	"fmt"
 	"io"
+	"math"
+)
+
+// See seqdec_arm64.go; the pure Go decoder has neither path.
+var (
+	twoPassMinFarShare     = 257 // never: the share is at most 256
+	decodeTwoPassMinWindow = math.MaxInt
 )
 
 // decode sequences from the stream with the provided history but without dictionary.
@@ -29,7 +35,7 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 	}
 	for i := range seqs {
 		var ll, mo, ml int
-		if br.off > 4+((maxOffsetBits+16+16)>>3) {
+		if br.cursor > 4+((maxOffsetBits+16+16)>>3) {
 			// inlined function:
 			// ll, mo, ml = s.nextFast(br, llState, mlState, ofState)
 
@@ -111,7 +117,7 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 		}
 		s.seqSize += ll + ml
 		if s.seqSize > maxBlockSize {
-			return fmt.Errorf("output (%d) bigger than max block size (%d)", s.seqSize, maxBlockSize)
+			return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 		}
 		litRemain -= ll
 		if litRemain < 0 {
@@ -149,7 +155,7 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 	}
 	s.seqSize += litRemain
 	if s.seqSize > maxBlockSize {
-		return fmt.Errorf("output (%d) bigger than max block size (%d)", s.seqSize, maxBlockSize)
+		return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 	}
 	err := br.close()
 	if err != nil {

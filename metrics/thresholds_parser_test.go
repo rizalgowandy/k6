@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
@@ -62,8 +42,6 @@ func TestParseThresholdExpression(t *testing.T) {
 		},
 	}
 	for _, testCase := range tests {
-		testCase := testCase
-
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -86,7 +64,7 @@ func TestParseThresholdExpression(t *testing.T) {
 
 func BenchmarkParseThresholdExpression(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		parseThresholdExpression("count>20") // nolint
+		_, _ = parseThresholdExpression("count>20")
 	}
 }
 
@@ -164,6 +142,20 @@ func TestParseThresholdAggregationMethod(t *testing.T) {
 			wantErr:         false,
 		},
 		{
+			name:            "percentile method with zero value is parsed",
+			input:           "p(0)",
+			wantMethod:      tokenPercentile,
+			wantMethodValue: null.FloatFrom(0),
+			wantErr:         false,
+		},
+		{
+			name:            "percentile method with 100 value is parsed",
+			input:           "p(100)",
+			wantMethod:      tokenPercentile,
+			wantMethodValue: null.FloatFrom(100),
+			wantErr:         false,
+		},
+		{
 			name:            "parsing invalid method fails",
 			input:           "foo",
 			wantMethod:      "",
@@ -191,10 +183,36 @@ func TestParseThresholdAggregationMethod(t *testing.T) {
 			wantMethodValue: null.Float{},
 			wantErr:         true,
 		},
+		{
+			name:            "parsing negative percentile value fails",
+			input:           "p(-1)",
+			wantMethod:      "",
+			wantMethodValue: null.Float{},
+			wantErr:         true,
+		},
+		{
+			name:            "parsing percentile value greater than 100 fails",
+			input:           "p(101)",
+			wantMethod:      "",
+			wantMethodValue: null.Float{},
+			wantErr:         true,
+		},
+		{
+			name:            "parsing NaN percentile value fails",
+			input:           "p(NaN)",
+			wantMethod:      "",
+			wantMethodValue: null.Float{},
+			wantErr:         true,
+		},
+		{
+			name:            "parsing infinite percentile value fails",
+			input:           "p(+Inf)",
+			wantMethod:      "",
+			wantMethodValue: null.Float{},
+			wantErr:         true,
+		},
 	}
 	for _, testCase := range tests {
-		testCase := testCase
-
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -223,7 +241,7 @@ func TestParseThresholdAggregationMethod(t *testing.T) {
 
 func BenchmarkParseThresholdAggregationMethod(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		parseThresholdAggregationMethod("p(99.9)") // nolint
+		_, _, _ = parseThresholdAggregationMethod("p(99.9)")
 	}
 }
 
@@ -320,8 +338,6 @@ func TestScanThresholdExpression(t *testing.T) {
 		},
 	}
 	for _, testCase := range tests {
-		testCase := testCase
-
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -356,6 +372,6 @@ func TestScanThresholdExpression(t *testing.T) {
 
 func BenchmarkScanThresholdExpression(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		scanThresholdExpression("foo<=bar") // nolint
+		_, _, _, _ = scanThresholdExpression("foo<=bar")
 	}
 }

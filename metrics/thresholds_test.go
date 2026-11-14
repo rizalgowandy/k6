@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
@@ -27,9 +7,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.k6.io/k6/errext"
-	"go.k6.io/k6/errext/exitcodes"
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/errext"
+	"go.k6.io/k6/v2/errext/exitcodes"
+	"go.k6.io/k6/v2/lib/types"
 	"gopkg.in/guregu/null.v3"
 )
 
@@ -153,8 +133,6 @@ func TestThreshold_runNoTaint(t *testing.T) {
 	}
 
 	for _, testCase := range tests {
-		testCase := testCase
-
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -196,7 +174,7 @@ func BenchmarkRunNoTaint(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		threshold.runNoTaint(sinks) // nolint
+		_, _ = threshold.runNoTaint(sinks)
 	}
 }
 
@@ -212,7 +190,7 @@ func TestThresholdRun(t *testing.T) {
 		threshold := newThreshold(`rate<0.01`, false, types.NullDuration{})
 		threshold.parsed = parsed
 
-		t.Run("no taint", func(t *testing.T) {
+		t.Run("no taint", func(t *testing.T) { //nolint:paralleltest
 			b, err := threshold.runNoTaint(sinks)
 			assert.NoError(t, err)
 			assert.True(t, b)
@@ -238,14 +216,14 @@ func TestThresholdRun(t *testing.T) {
 		threshold := newThreshold(`rate<0.01`, false, types.NullDuration{})
 		threshold.parsed = parsed
 
-		t.Run("no taint", func(t *testing.T) {
+		t.Run("no taint", func(t *testing.T) { //nolint:paralleltest
 			b, err := threshold.runNoTaint(sinks)
 			assert.NoError(t, err)
 			assert.False(t, b)
 			assert.False(t, threshold.LastFailed)
 		})
 
-		t.Run("taint", func(t *testing.T) {
+		t.Run("taint", func(t *testing.T) { //nolint:paralleltest
 			b, err := threshold.run(sinks)
 			assert.NoError(t, err)
 			assert.False(t, b)
@@ -507,8 +485,6 @@ func TestThresholdsValidate(t *testing.T) {
 		}
 
 		for _, testCase := range tests {
-			testCase := testCase
-
 			t.Run(testCase.name, func(t *testing.T) {
 				t.Parallel()
 
@@ -658,12 +634,21 @@ func TestThresholdsRunAll(t *testing.T) {
 	}
 }
 
-func TestThresholds_Run(t *testing.T) {
+func getTrendSink(values ...float64) *TrendSink {
+	sink := NewTrendSink()
+	for _, v := range values {
+		sink.Add(Sample{Value: v})
+	}
+	return sink
+}
+
+func TestThresholdsRun(t *testing.T) {
 	t.Parallel()
 
 	type args struct {
-		sink     Sink
-		duration time.Duration
+		sink                 Sink
+		thresholdExpressions []string
+		duration             time.Duration
 	}
 	tests := []struct {
 		name    string
@@ -672,36 +657,99 @@ func TestThresholds_Run(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "Running thresholds of existing sink",
-			args:    args{DummySink{"p(95)": 1234.5}, 0},
+			name: "Running thresholds of existing sink",
+			args: args{
+				sink:                 &CounterSink{Value: 1234.5},
+				thresholdExpressions: []string{"count<2000"},
+				duration:             0,
+			},
 			want:    true,
 			wantErr: false,
 		},
 		{
-			name:    "Running thresholds of existing sink but failing threshold",
-			args:    args{DummySink{"p(95)": 3000}, 0},
+			name: "Running thresholds of existing sink but failing threshold",
+			args: args{
+				sink:                 &CounterSink{Value: 3000},
+				thresholdExpressions: []string{"count<2000"},
+				duration:             0,
+			},
 			want:    false,
 			wantErr: false,
 		},
 		{
-			name:    "Running threshold on non existing sink does not fail",
-			args:    args{DummySink{"dummy": 0}, 0},
+			name: "Running threshold on non existing sink does not fail",
+			args: args{
+				sink:                 &CounterSink{},
+				thresholdExpressions: []string{"p(95)<2000"},
+				duration:             0,
+			},
 			want:    true,
+			wantErr: false,
+		},
+		{
+			// A zero duration must not turn the counter's rate into +Inf. CounterSink.Rate
+			// guards against this, so a "rate" threshold has to behave the same way here.
+			name: "Running a counter rate threshold with zero duration does not divide by zero",
+			args: args{
+				sink:                 &CounterSink{Value: 1234.5},
+				thresholdExpressions: []string{"rate<100"},
+				duration:             0,
+			},
+			want:    true,
+			wantErr: false,
+		},
+		{
+			name: "Running threshold on trend sink with no values and passing med statement succeeds",
+			args: args{
+				sink:                 getTrendSink(),
+				thresholdExpressions: []string{"med<39"},
+				duration:             0,
+			},
+			want:    true,
+			wantErr: false,
+		},
+		{
+			name: "Running threshold on trend sink with no values and non passing med statement fails",
+			args: args{
+				sink:                 getTrendSink(),
+				thresholdExpressions: []string{"med>39"},
+				duration:             0,
+			},
+			want:    false,
+			wantErr: false,
+		},
+		{
+			name: "Running threshold on trend sink with values and passing med statement succeeds",
+			args: args{
+				sink:                 getTrendSink(70, 80, 90),
+				thresholdExpressions: []string{"med>39"},
+				duration:             0,
+			},
+			want:    true,
+			wantErr: false,
+		},
+		{
+			name: "Running threshold on trend sink with values and failing med statement fails",
+			args: args{
+				sink:                 getTrendSink(70, 80, 90),
+				thresholdExpressions: []string{"med<39"},
+				duration:             0,
+			},
+			want:    false,
 			wantErr: false,
 		},
 	}
 	for _, testCase := range tests {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			thresholds := NewThresholds([]string{"p(95)<2000"})
+			thresholds := NewThresholds(testCase.args.thresholdExpressions)
 			gotParseErr := thresholds.Parse()
 			require.NoError(t, gotParseErr)
 
 			gotOk, gotErr := thresholds.Run(testCase.args.sink, testCase.args.duration)
-			assert.Equal(t, gotErr != nil, testCase.wantErr, "Thresholds.Run() error = %v, wantErr %v", gotErr, testCase.wantErr)
-			assert.Equal(t, gotOk, testCase.want, "Thresholds.Run() = %v, want %v", gotOk, testCase.want)
+			assert.Equal(t, testCase.wantErr, gotErr != nil, "Thresholds.Run() error = %v, wantErr %v", gotErr, testCase.wantErr)
+			assert.Equal(t, testCase.want, gotOk, "Thresholds.Run() = %v, want %v", gotOk, testCase.want)
 		})
 	}
 }
@@ -782,8 +830,6 @@ func TestThresholdsJSON(t *testing.T) {
 	}
 
 	for _, data := range testdata {
-		data := data
-
 		t.Run(data.JSON, func(t *testing.T) {
 			t.Parallel()
 
@@ -796,7 +842,7 @@ func TestThresholdsJSON(t *testing.T) {
 				assert.Equal(t, data.gracePeriod, ts.Thresholds[i].AbortGracePeriod)
 			}
 
-			t.Run("marshal", func(t *testing.T) {
+			t.Run("marshal", func(t *testing.T) { //nolint:paralleltest
 				data2, err := MarshalJSONWithoutHTMLEscape(ts)
 				assert.NoError(t, err)
 				output := data.JSON

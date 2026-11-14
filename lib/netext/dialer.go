@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package netext
 
 import (
@@ -28,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/lib/types"
+	"go.k6.io/k6/v2/metrics"
 )
 
 // Dialer wraps net.Dialer and provides k6 specific functionality -
@@ -41,7 +21,7 @@ type Dialer struct {
 	Resolver         Resolver
 	Blacklist        []*lib.IPNet
 	BlockedHostnames *types.HostnameTrie
-	Hosts            map[string]*lib.HostAddress
+	Hosts            *types.Hosts
 
 	BytesRead    int64
 	BytesWritten int64
@@ -81,7 +61,7 @@ func (d *Dialer) DialContext(ctx context.Context, proto, addr string) (net.Conn,
 	if err != nil {
 		return nil, err
 	}
-	conn, err := d.Dialer.DialContext(ctx, proto, dialAddr)
+	conn, err := d.Dialer.DialContext(ctx, proto, dialAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -89,74 +69,69 @@ func (d *Dialer) DialContext(ctx context.Context, proto, addr string) (net.Conn,
 	return conn, err
 }
 
-// GetTrail creates a new NetTrail instance with the Dialer
-// sent and received data metrics and the supplied times and tags.
-// TODO: Refactor this according to
-// https://github.com/k6io/k6/pull/1203#discussion_r337938370
-func (d *Dialer) GetTrail(
-	startTime, endTime time.Time, fullIteration bool, emitIterations bool, tags *metrics.SampleTags,
-	builtinMetrics *metrics.BuiltinMetrics,
-) *NetTrail {
-	bytesWritten := atomic.SwapInt64(&d.BytesWritten, 0)
-	bytesRead := atomic.SwapInt64(&d.BytesRead, 0)
-	samples := []metrics.Sample{
-		{
-			Time:   endTime,
-			Metric: builtinMetrics.DataSent,
-			Value:  float64(bytesWritten),
-			Tags:   tags,
-		},
-		{
-			Time:   endTime,
-			Metric: builtinMetrics.DataReceived,
-			Value:  float64(bytesRead),
-			Tags:   tags,
-		},
-	}
-	if fullIteration {
-		samples = append(samples, metrics.Sample{
-			Time:   endTime,
-			Metric: builtinMetrics.IterationDuration,
-			Value:  metrics.D(endTime.Sub(startTime)),
-			Tags:   tags,
-		})
-		if emitIterations {
-			samples = append(samples, metrics.Sample{
-				Time:   endTime,
-				Metric: builtinMetrics.Iterations,
-				Value:  1,
-				Tags:   tags,
-			})
-		}
+// ResolveAddr looks up the IP address for the given host and optionally port.
+// The address is expected in the form "host:port" or just "host".
+// It returns the resolved IP, and an error if any.
+func (d *Dialer) ResolveAddr(addr string) (net.IP, int, error) {
+	// Check if the address has a port, if not add a dummy port for parsing
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		// Address doesn't have a port, add a dummy one
+		addr = net.JoinHostPort(addr, "0")
 	}
 
-	return &NetTrail{
-		BytesRead:     bytesRead,
-		BytesWritten:  bytesWritten,
-		FullIteration: fullIteration,
-		StartTime:     startTime,
-		EndTime:       endTime,
-		Tags:          tags,
-		Samples:       samples,
+	remote, err := d.getDialAddr(addr)
+	if err != nil {
+		return nil, 0, err
 	}
+
+	return remote.IP, remote.Port, nil
 }
 
-func (d *Dialer) getDialAddr(addr string) (string, error) {
+// IOSamples returns samples for data send and received since it last call and zeros out.
+// It uses the provided time as the sample time and tags and builtinMetrics to build the samples.
+func (d *Dialer) IOSamples(
+	sampleTime time.Time, ctm metrics.TagsAndMeta, builtinMetrics *metrics.BuiltinMetrics,
+) metrics.SampleContainer {
+	bytesWritten := atomic.SwapInt64(&d.BytesWritten, 0)
+	bytesRead := atomic.SwapInt64(&d.BytesRead, 0)
+	return metrics.Samples([]metrics.Sample{
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.DataSent,
+				Tags:   ctm.Tags,
+			},
+			Time:     sampleTime,
+			Metadata: ctm.Metadata,
+			Value:    float64(bytesWritten),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.DataReceived,
+				Tags:   ctm.Tags,
+			},
+			Time:     sampleTime,
+			Metadata: ctm.Metadata,
+			Value:    float64(bytesRead),
+		},
+	})
+}
+
+func (d *Dialer) getDialAddr(addr string) (*types.Host, error) {
 	remote, err := d.findRemote(addr)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	for _, ipnet := range d.Blacklist {
 		if ipnet.Contains(remote.IP) {
-			return "", BlackListedIPError{ip: remote.IP, net: ipnet}
+			return nil, BlackListedIPError{ip: remote.IP, net: ipnet}
 		}
 	}
 
-	return remote.String(), nil
+	return remote, nil
 }
 
-func (d *Dialer) findRemote(addr string) (*lib.HostAddress, error) {
+func (d *Dialer) findRemote(addr string) (*types.Host, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -169,13 +144,15 @@ func (d *Dialer) findRemote(addr string) (*lib.HostAddress, error) {
 		}
 	}
 
-	remote, err := d.getConfiguredHost(addr, host, port)
-	if err != nil || remote != nil {
-		return remote, err
+	if d.Hosts != nil {
+		remote, e := d.getConfiguredHost(addr, host, port)
+		if e != nil || remote != nil {
+			return remote, e
+		}
 	}
 
 	if ip != nil {
-		return lib.NewHostAddress(ip, port)
+		return types.NewHost(ip, port)
 	}
 
 	ip, err = d.Resolver.LookupIP(host)
@@ -187,15 +164,15 @@ func (d *Dialer) findRemote(addr string) (*lib.HostAddress, error) {
 		return nil, fmt.Errorf("lookup %s: no such host", host)
 	}
 
-	return lib.NewHostAddress(ip, port)
+	return types.NewHost(ip, port)
 }
 
-func (d *Dialer) getConfiguredHost(addr, host, port string) (*lib.HostAddress, error) {
-	if remote, ok := d.Hosts[addr]; ok {
+func (d *Dialer) getConfiguredHost(addr, host, port string) (*types.Host, error) {
+	if remote := d.Hosts.Match(addr); remote != nil {
 		return remote, nil
 	}
 
-	if remote, ok := d.Hosts[host]; ok {
+	if remote := d.Hosts.Match(host); remote != nil {
 		if remote.Port != 0 || port == "" {
 			return remote, nil
 		}
@@ -211,37 +188,7 @@ func (d *Dialer) getConfiguredHost(addr, host, port string) (*lib.HostAddress, e
 		return &newRemote, nil
 	}
 
-	return nil, nil
-}
-
-// NetTrail contains information about the exchanged data size and length of a
-// series of connections from a particular netext.Dialer
-type NetTrail struct {
-	BytesRead     int64
-	BytesWritten  int64
-	FullIteration bool
-	StartTime     time.Time
-	EndTime       time.Time
-	Tags          *metrics.SampleTags
-	Samples       []metrics.Sample
-}
-
-// Ensure that interfaces are implemented correctly
-var _ metrics.ConnectedSampleContainer = &NetTrail{}
-
-// GetSamples implements the metrics.SampleContainer interface.
-func (ntr *NetTrail) GetSamples() []metrics.Sample {
-	return ntr.Samples
-}
-
-// GetTags implements the metrics.ConnectedSampleContainer interface.
-func (ntr *NetTrail) GetTags() *metrics.SampleTags {
-	return ntr.Tags
-}
-
-// GetTime implements the metrics.ConnectedSampleContainer interface.
-func (ntr *NetTrail) GetTime() time.Time {
-	return ntr.EndTime
+	return nil, nil //nolint:nilnil
 }
 
 // Conn wraps net.Conn and keeps track of sent and received data size

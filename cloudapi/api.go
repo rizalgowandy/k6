@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cloudapi
 
 import (
@@ -27,18 +7,24 @@ import (
 	"net/http"
 	"strconv"
 
-	"go.k6.io/k6/lib"
+	"github.com/sirupsen/logrus"
+	"go.k6.io/k6/v2/lib"
 )
 
+// ResultStatus represents the result status of a test.
 type ResultStatus int
 
 const (
+	// ResultStatusPassed means the test has passed
 	ResultStatusPassed ResultStatus = 0
+	// ResultStatusFailed means the test has failed
 	ResultStatusFailed ResultStatus = 1
 )
 
+// ThresholdResult is a helper type to make sending the thresholds result to the cloud.
 type ThresholdResult map[string]map[string]bool
 
+// TestRun represents a test run.
 type TestRun struct {
 	Name       string              `json:"name"`
 	ProjectID  int64               `json:"project_id,omitempty"`
@@ -46,88 +32,146 @@ type TestRun struct {
 	Thresholds map[string][]string `json:"thresholds"`
 	// Duration of test in seconds. -1 for unknown length, 0 for continuous running.
 	Duration int64 `json:"duration"`
+	// Archive is the test script archive to (maybe) upload to the cloud.
+	Archive *lib.Archive `json:"-"`
 }
 
+// LogEntry can be used by the cloud to tell k6 to log something to the console,
+// so the user can see it.
+type LogEntry struct {
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
+// CreateTestRunResponse represents the response of successfully created test run in the cloud.
 type CreateTestRunResponse struct {
-	ReferenceID    string  `json:"reference_id"`
-	ConfigOverride *Config `json:"config"`
+	ReferenceID    string     `json:"reference_id"`
+	ConfigOverride *Config    `json:"config"`
+	Logs           []LogEntry `json:"logs"`
+
+	// TestRunToken is an ephemeral token for authenticating secrets requests for this run.
+	// It has limited scope (read-only secrets for this project) and expires after the test
+	// duration plus a grace period.
+	TestRunToken string `json:"test_run_token,omitempty"`
+
+	// SecretsConfig contains the endpoint and response format for fetching secrets.
+	SecretsConfig *SecretsConfig `json:"secrets_config,omitempty"`
 }
 
-type TestProgressResponse struct {
-	RunStatusText string        `json:"run_status_text"`
-	RunStatus     lib.RunStatus `json:"run_status"`
-	ResultStatus  ResultStatus  `json:"result_status"`
-	Progress      float64       `json:"progress"`
+// SecretsConfig holds the endpoint configuration needed to access secrets from the cloud.
+type SecretsConfig struct {
+	// Endpoint is the URL template for fetching secrets.
+	// It should contain {key} placeholder, e.g., "https://api.k6.io/v1/secrets/12345/{key}"
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// ResponsePath is the JSON path to extract the secret value from the response.
+	// Default is "plaintext" for cloud secrets.
+	ResponsePath string `json:"response_path,omitempty"`
 }
 
-type LoginResponse struct {
-	Token string `json:"token"`
+// ValidateTokenResponse is the response of a token validation.
+type ValidateTokenResponse struct {
+	IsValid bool   `json:"is_valid"`
+	Message string `json:"message"`
+	Token   string `json:"token-info"`
 }
 
+func (c *Client) handleLogEntriesFromCloud(ctrr CreateTestRunResponse) {
+	logger := c.logger.WithField("source", "grafana-k6-cloud")
+	for _, logEntry := range ctrr.Logs {
+		level, err := logrus.ParseLevel(logEntry.Level)
+		if err != nil {
+			logger.Debugf("invalid message level '%s' for message '%s': %s", logEntry.Level, logEntry.Message, err)
+			level = logrus.ErrorLevel
+		}
+		logger.Log(level, logEntry.Message)
+	}
+}
+
+// CreateTestRun is used when a test run is being executed locally, while the
+// results are streamed to the cloud, i.e. `k6 cloud run --local-execution` or `k6 run --out cloud script.js`.
 func (c *Client) CreateTestRun(testRun *TestRun) (*CreateTestRunResponse, error) {
 	url := fmt.Sprintf("%s/tests", c.baseURL)
-	req, err := c.NewRequest("POST", url, testRun)
+
+	// Because the kind of request we make can vary depending on the test run configuration, we delegate
+	// its creation to a helper.
+	request, err := c.makeCreateTestRunRequest(url, testRun)
 	if err != nil {
 		return nil, err
 	}
 
-	ctrr := CreateTestRunResponse{}
-	err = c.Do(req, &ctrr)
+	response := CreateTestRunResponse{}
+	err = c.Do(request, &response)
 	if err != nil {
 		return nil, err
 	}
 
-	if ctrr.ReferenceID == "" {
+	c.handleLogEntriesFromCloud(response)
+	if response.ReferenceID == "" {
 		return nil, fmt.Errorf("failed to get a reference ID")
 	}
 
-	return &ctrr, nil
+	return &response, nil
 }
 
-func (c *Client) StartCloudTestRun(name string, projectID int64, arc *lib.Archive) (string, error) {
-	requestUrl := fmt.Sprintf("%s/archive-upload", c.baseURL)
-
-	var buf bytes.Buffer
-	mp := multipart.NewWriter(&buf)
-
-	if err := mp.WriteField("name", name); err != nil {
-		return "", err
+// makeCreateTestRunRequest creates a new HTTP request for creating a test run.
+//
+// If the test run archive isn't set, the request will be a regular JSON request with the test run information.
+// Otherwise, the request will be a multipart form request containing the test run information and the archive file.
+func (c *Client) makeCreateTestRunRequest(url string, testRun *TestRun) (*http.Request, error) {
+	// If the test run archive isn't set, we are not uploading an archive and can use the regular request JSON format.
+	if testRun.Archive == nil {
+		return c.NewRequest(http.MethodPost, url, testRun)
 	}
 
-	if projectID != 0 {
-		if err := mp.WriteField("project_id", strconv.FormatInt(projectID, 10)); err != nil {
-			return "", err
+	// Otherwise, we need to create a multipart form request containing the test run information as
+	// well as the archive file.
+	fields := [][2]string{
+		{"name", testRun.Name},
+		{"project_id", strconv.FormatInt(testRun.ProjectID, 10)},
+		{"vus", strconv.FormatInt(testRun.VUsMax, 10)},
+		{"duration", strconv.FormatInt(testRun.Duration, 10)},
+	}
+
+	var buffer bytes.Buffer
+	multipartWriter := multipart.NewWriter(&buffer)
+
+	for _, field := range fields {
+		if err := multipartWriter.WriteField(field[0], field[1]); err != nil {
+			return nil, err
 		}
 	}
 
-	fw, err := mp.CreateFormFile("file", "archive.tar")
+	fw, err := multipartWriter.CreateFormFile("file", "archive.tar")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	if err := arc.Write(fw); err != nil {
-		return "", err
+	if err = testRun.Archive.Write(fw); err != nil {
+		return nil, err
 	}
 
-	if err := mp.Close(); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", requestUrl, &buf)
+	// Close the multipart writer to finalize the form data
+	err = multipartWriter.Close()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	req.Header.Set("Content-Type", mp.FormDataContentType())
-
-	ctrr := CreateTestRunResponse{}
-	if err := c.Do(req, &ctrr); err != nil {
-		return "", err
+	// Create a new POST request with the multipart form data
+	req, err := http.NewRequest(http.MethodPost, url, &buffer) //nolint:noctx
+	if err != nil {
+		return nil, err
 	}
-	return ctrr.ReferenceID, nil
+
+	// Set the content type to the one generated by the multipart writer
+	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+
+	return req, nil
 }
 
-func (c *Client) TestFinished(referenceID string, thresholds ThresholdResult, tained bool, runStatus lib.RunStatus) error {
+// TestFinished sends the result and run status values to the cloud, along with
+// information for the test thresholds, and marks the test run as finished.
+func (c *Client) TestFinished(referenceID string, thresholds ThresholdResult, tained bool, runStatus RunStatus) error {
 	url := fmt.Sprintf("%s/tests/%s", c.baseURL, referenceID)
 
 	resultStatus := ResultStatusPassed
@@ -137,7 +181,7 @@ func (c *Client) TestFinished(referenceID string, thresholds ThresholdResult, ta
 
 	data := struct {
 		ResultStatus ResultStatus    `json:"result_status"`
-		RunStatus    lib.RunStatus   `json:"run_status"`
+		RunStatus    RunStatus       `json:"run_status"`
 		Thresholds   ThresholdResult `json:"thresholds"`
 	}{
 		resultStatus,
@@ -153,71 +197,23 @@ func (c *Client) TestFinished(referenceID string, thresholds ThresholdResult, ta
 	return c.Do(req, nil)
 }
 
-func (c *Client) GetTestProgress(referenceID string) (*TestProgressResponse, error) {
-	url := fmt.Sprintf("%s/test-progress/%s", c.baseURL, referenceID)
-	req, err := c.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	ctrr := TestProgressResponse{}
-	err = c.Do(req, &ctrr)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ctrr, nil
+type validateTokenRequest struct {
+	Token string `json:"token"`
 }
 
-func (c *Client) StopCloudTestRun(referenceID string) error {
-	url := fmt.Sprintf("%s/tests/%s/stop", c.baseURL, referenceID)
-
-	req, err := c.NewRequest("POST", url, nil)
-	if err != nil {
-		return err
-	}
-
-	return c.Do(req, nil)
-}
-
-func (c *Client) ValidateOptions(options lib.Options) error {
-	url := fmt.Sprintf("%s/validate-options", c.baseURL)
-
-	data := struct {
-		Options lib.Options `json:"options"`
-	}{
-		options,
-	}
-
-	req, err := c.NewRequest("POST", url, data)
-	if err != nil {
-		return err
-	}
-
-	return c.Do(req, nil)
-}
-
-func (c *Client) Login(email string, password string) (*LoginResponse, error) {
-	url := fmt.Sprintf("%s/login", c.baseURL)
-
-	data := struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}{
-		email,
-		password,
-	}
-
-	req, err := c.NewRequest("POST", url, data)
+// ValidateToken calls the endpoint to validate the Client's token and returns the result.
+func (c *Client) ValidateToken() (*ValidateTokenResponse, error) {
+	data := validateTokenRequest{Token: c.token}
+	req, err := c.NewRequest("POST", c.baseURL+"/validate-token", data)
 	if err != nil {
 		return nil, err
 	}
 
-	lr := LoginResponse{}
-	err = c.Do(req, &lr)
+	vtr := ValidateTokenResponse{}
+	err = c.Do(req, &vtr)
 	if err != nil {
 		return nil, err
 	}
 
-	return &lr, nil
+	return &vtr, nil
 }

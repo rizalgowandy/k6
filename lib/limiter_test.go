@@ -1,22 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
 package lib
 
 import (
@@ -64,7 +45,6 @@ func TestSlotLimiters(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(fmt.Sprintf("limit=%d,launches=%d", tc.limit, tc.launches), func(t *testing.T) {
 			t.Parallel()
 			l := NewSlotLimiter(tc.limit)
@@ -79,17 +59,17 @@ func TestSlotLimiters(t *testing.T) {
 				wg.Add(tc.limit)
 			}
 
-			var counter uint32
+			var counter atomic.Uint32
 
 			for i := 0; i < tc.launches; i++ {
 				go func() {
 					l.Begin()
-					atomic.AddUint32(&counter, 1)
+					counter.Add(1)
 					wg.Done()
 				}()
 			}
 			wg.Wait()
-			assert.Equal(t, uint32(tc.expMid), atomic.LoadUint32(&counter))
+			assert.EqualValues(t, tc.expMid, counter.Load())
 
 			if tc.limit != 0 && tc.limit < tc.launches {
 				wg.Add(tc.launches - tc.limit)
@@ -97,7 +77,7 @@ func TestSlotLimiters(t *testing.T) {
 					l.End()
 				}
 				wg.Wait()
-				assert.Equal(t, uint32(tc.launches), atomic.LoadUint32(&counter))
+				assert.EqualValues(t, tc.launches, counter.Load())
 			}
 		})
 	}

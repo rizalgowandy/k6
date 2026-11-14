@@ -1,32 +1,12 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package netext
 
 import (
-	"math/rand"
+	"math/rand" // nosemgrep: math-random-used // used for random TTL on DNS resolve
 	"net"
 	"sync"
 	"time"
 
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/lib/types"
 )
 
 // MultiResolver returns all IP addresses for the given host.
@@ -64,7 +44,7 @@ type cacheResolver struct {
 func NewResolver(
 	actRes MultiResolver, ttl time.Duration, sel types.DNSSelect, pol types.DNSPolicy,
 ) Resolver {
-	r := rand.New(rand.NewSource(time.Now().UnixNano())) // nolint: gosec
+	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
 	res := resolver{
 		resolve:     actRes,
 		selectIndex: sel,
@@ -174,7 +154,7 @@ func (r *resolver) applyPolicy(ips []net.IP) (retIPs []net.IP) {
 		retIPs = ips
 	}
 
-	return
+	return retIPs
 }
 
 func groupByVersion(ips []net.IP) (ip4 []net.IP, ip6 []net.IP) {
@@ -186,5 +166,5 @@ func groupByVersion(ips []net.IP) (ip4 []net.IP, ip6 []net.IP) {
 		}
 	}
 
-	return
+	return ip4, ip6
 }

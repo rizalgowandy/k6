@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
@@ -25,14 +5,16 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
-	"strconv"
+	"slices"
 
-	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/metrics"
 	"gopkg.in/guregu/null.v3"
+
+	"go.k6.io/k6/v2/lib/types"
+	"go.k6.io/k6/v2/metrics"
 )
 
 // DefaultScenarioName is used as the default key/ID of the scenario config entries
@@ -41,16 +23,19 @@ import (
 const DefaultScenarioName = "default"
 
 // DefaultSummaryTrendStats are the default trend columns shown in the test summary output
-// nolint: gochecknoglobals
+//
+//nolint:gochecknoglobals
 var DefaultSummaryTrendStats = []string{"avg", "min", "med", "max", "p(90)", "p(95)"}
 
-// Describes a TLS version. Serialised to/from JSON as a string, eg. "tls1.2".
+// TLSVersion describes a TLS version. Serialised to/from JSON as a string, eg. "tls1.2".
 type TLSVersion int
 
+// MarshalJSON implements the json.Marshaler interface
 func (v TLSVersion) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + SupportedTLSVersionsToString[v] + `"`), nil
 }
 
+// UnmarshalJSON implements the json.Unmarshaler interface
 func (v *TLSVersion) UnmarshalJSON(data []byte) error {
 	var str string
 	if err := StrictJSONUnmarshal(data, &str); err != nil {
@@ -69,16 +54,17 @@ func (v *TLSVersion) UnmarshalJSON(data []byte) error {
 }
 
 // Fields for TLSVersions. Unmarshalling hack.
-type TLSVersionsFields struct {
+type tlsVersionsFields struct {
 	Min TLSVersion `json:"min" ignored:"true"` // Minimum allowed version, 0 = any.
 	Max TLSVersion `json:"max" ignored:"true"` // Maximum allowed version, 0 = any.
 }
 
-// Describes a set (min/max) of TLS versions.
-type TLSVersions TLSVersionsFields
+// TLSVersions describes a set (min/max) of TLS versions.
+type TLSVersions tlsVersionsFields
 
+// UnmarshalJSON implements the json.Unmarshaler interface
 func (v *TLSVersions) UnmarshalJSON(data []byte) error {
-	var fields TLSVersionsFields
+	var fields tlsVersionsFields
 	if err := StrictJSONUnmarshal(data, &fields); err != nil {
 		var ver TLSVersion
 		if err2 := StrictJSONUnmarshal(data, &ver); err2 != nil {
@@ -91,7 +77,7 @@ func (v *TLSVersions) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// A list of TLS cipher suites.
+// TLSCipherSuites represents a list of TLS cipher suites.
 // Marshals and unmarshals from a list of names, eg. "TLS_ECDHE_RSA_WITH_RC4_128_SHA".
 type TLSCipherSuites []uint16
 
@@ -109,6 +95,7 @@ func (s *TLSCipherSuites) MarshalJSON() ([]byte, error) {
 	return json.Marshal(suiteNames)
 }
 
+// UnmarshalJSON implements the json.Unmarshaler interface
 func (s *TLSCipherSuites) UnmarshalJSON(data []byte) error {
 	var suiteNames []string
 	if err := StrictJSONUnmarshal(data, &suiteNames); err != nil {
@@ -129,7 +116,7 @@ func (s *TLSCipherSuites) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Fields for TLSAuth. Unmarshalling hack.
+// TLSAuthFields for TLSAuth. Unmarshalling hack.
 type TLSAuthFields struct {
 	// Certificate and key as a PEM-encoded string, including "-----BEGIN CERTIFICATE-----".
 	Cert     string      `json:"cert"`
@@ -140,12 +127,13 @@ type TLSAuthFields struct {
 	Domains []string `json:"domains"`
 }
 
-// Defines a TLS client certificate to present to certain hosts.
+// TLSAuth defines a TLS client certificate to present to certain hosts.
 type TLSAuth struct {
 	TLSAuthFields
 	certificate *tls.Certificate
 }
 
+// UnmarshalJSON implements the json.Unmarshaler interface
 func (c *TLSAuth) UnmarshalJSON(data []byte) error {
 	if err := StrictJSONUnmarshal(data, &c.TLSAuthFields); err != nil {
 		return err
@@ -156,6 +144,8 @@ func (c *TLSAuth) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Certificate returns a certificate based on the TLSAuth
+// not thread safe
 func (c *TLSAuth) Certificate() (*tls.Certificate, error) {
 	key := []byte(c.Key)
 	var err error
@@ -192,7 +182,7 @@ func decryptPrivateKey(privKey, password string) ([]byte, error) {
 	   being used here because it is deprecated due to it not supporting *good* crypography
 	   ultimately though we want to support something so we will be using it for now.
 	*/
-	decryptedKey, err := x509.DecryptPEMBlock(block, []byte(password)) // nolint: staticcheck
+	decryptedKey, err := x509.DecryptPEMBlock(block, []byte(password)) //nolint:staticcheck
 	if err != nil {
 		return nil, err
 	}
@@ -224,84 +214,6 @@ func (ipnet *IPNet) MarshalText() ([]byte, error) {
 	return []byte(ipnet.String()), nil
 }
 
-// HostAddress stores information about IP and port
-// for a host.
-type HostAddress net.TCPAddr
-
-// NewHostAddress creates a pointer to a new address with an IP object.
-func NewHostAddress(ip net.IP, portString string) (*HostAddress, error) {
-	var port int
-	if portString != "" {
-		var err error
-		if port, err = strconv.Atoi(portString); err != nil {
-			return nil, err
-		}
-	}
-
-	return &HostAddress{
-		IP:   ip,
-		Port: port,
-	}, nil
-}
-
-// String converts a HostAddress into a string.
-func (h *HostAddress) String() string {
-	return (*net.TCPAddr)(h).String()
-}
-
-// MarshalText implements the encoding.TextMarshaler interface.
-// The encoding is the same as returned by String, with one exception:
-// When len(ip) is zero, it returns an empty slice.
-func (h *HostAddress) MarshalText() ([]byte, error) {
-	if h == nil || len(h.IP) == 0 {
-		return []byte(""), nil
-	}
-
-	if len(h.IP) != net.IPv4len && len(h.IP) != net.IPv6len {
-		return nil, &net.AddrError{Err: "invalid IP address", Addr: h.IP.String()}
-	}
-
-	return []byte(h.String()), nil
-}
-
-// UnmarshalText implements the encoding.TextUnmarshaler interface.
-// The IP address is expected in a form accepted by ParseIP.
-func (h *HostAddress) UnmarshalText(text []byte) error {
-	if len(text) == 0 {
-		return &net.ParseError{Type: "IP address", Text: "<nil>"}
-	}
-
-	ip, port, err := splitHostPort(text)
-	if err != nil {
-		return err
-	}
-
-	nh, err := NewHostAddress(ip, port)
-	if err != nil {
-		return err
-	}
-
-	*h = *nh
-
-	return nil
-}
-
-func splitHostPort(text []byte) (net.IP, string, error) {
-	host, port, err := net.SplitHostPort(string(text))
-	if err != nil {
-		// This error means that there is no port.
-		// Make host the full text.
-		host = string(text)
-	}
-
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil, "", &net.ParseError{Type: "IP address", Text: host}
-	}
-
-	return ip, port, nil
-}
-
 // ParseCIDR creates an IPNet out of a CIDR string
 func ParseCIDR(s string) (*IPNet, error) {
 	_, ipnet, err := net.ParseCIDR(s)
@@ -314,6 +226,7 @@ func ParseCIDR(s string) (*IPNet, error) {
 	return &parsedIPNet, nil
 }
 
+// Options represent configure options for k6.
 type Options struct {
 	// Should the test start in a paused state?
 	Paused null.Bool `json:"paused" envconfig:"K6_PAUSED"`
@@ -336,10 +249,11 @@ type Options struct {
 	ExecutionSegmentSequence *ExecutionSegmentSequence `json:"executionSegmentSequence" ignored:"true"`
 
 	// Timeouts for the setup() and teardown() functions
-	NoSetup         null.Bool          `json:"noSetup" envconfig:"K6_NO_SETUP"`
-	SetupTimeout    types.NullDuration `json:"setupTimeout" envconfig:"K6_SETUP_TIMEOUT"`
-	NoTeardown      null.Bool          `json:"noTeardown" envconfig:"K6_NO_TEARDOWN"`
-	TeardownTimeout types.NullDuration `json:"teardownTimeout" envconfig:"K6_TEARDOWN_TIMEOUT"`
+	NoSetup              null.Bool          `json:"noSetup" envconfig:"K6_NO_SETUP"`
+	SetupTimeout         types.NullDuration `json:"setupTimeout" envconfig:"K6_SETUP_TIMEOUT"`
+	NoTeardown           null.Bool          `json:"noTeardown" envconfig:"K6_NO_TEARDOWN"`
+	TeardownTimeout      types.NullDuration `json:"teardownTimeout" envconfig:"K6_TEARDOWN_TIMEOUT"`
+	HandleSummaryTimeout types.NullDuration `json:"handleSummaryTimeout" envconfig:"K6_HANDLE_SUMMARY_TIMEOUT"`
 
 	// Limit HTTP requests per second.
 	RPS null.Int `json:"rps" envconfig:"K6_RPS"`
@@ -360,6 +274,9 @@ type Options struct {
 	// Should all HTTP requests and responses be logged (excluding body)?
 	HTTPDebug null.String `json:"httpDebug" envconfig:"K6_HTTP_DEBUG"`
 
+	// Should credential headers be masked in the HTTP debug output?
+	HTTPDebugRedact null.Bool `json:"httpDebugRedact" envconfig:"K6_HTTP_DEBUG_REDACT"`
+
 	// Accept invalid or untrusted TLS certificates.
 	InsecureSkipTLSVerify null.Bool `json:"insecureSkipTLSVerify" envconfig:"K6_INSECURE_SKIP_TLS_VERIFY"`
 
@@ -367,6 +284,12 @@ type Options struct {
 	TLSCipherSuites *TLSCipherSuites `json:"tlsCipherSuites" envconfig:"K6_TLS_CIPHER_SUITES"`
 	TLSVersion      *TLSVersions     `json:"tlsVersion" ignored:"true"`
 	TLSAuth         []*TLSAuth       `json:"tlsAuth" envconfig:"K6_TLSAUTH"`
+
+	// Fetch missing intermediate certificates via the AIA (Authority Information Access)
+	// extension when the server presents an incomplete chain. Mirrors what browsers do.
+	// Disabled by default; opt in via tlsAIAFetch: true or K6_TLS_AIA_FETCH=true.
+	// Has no effect when InsecureSkipTLSVerify is true.
+	TLSAIAFetch null.Bool `json:"tlsAIAFetch" envconfig:"K6_TLS_AIA_FETCH"`
 
 	// Throw warnings (eg. failed HTTP requests) as errors instead of simply logging them.
 	Throw null.Bool `json:"throw" envconfig:"K6_THROW"`
@@ -383,7 +306,7 @@ type Options struct {
 	BlockedHostnames types.NullHostnameTrie `json:"blockHostnames" envconfig:"K6_BLOCK_HOSTNAMES"`
 
 	// Hosts overrides dns entries for given hosts
-	Hosts map[string]*HostAddress `json:"hosts" envconfig:"K6_HOSTS"`
+	Hosts types.NullHosts `json:"hosts" envconfig:"K6_HOSTS"`
 
 	// Disable keep-alive connections
 	NoConnectionReuse null.Bool `json:"noConnectionReuse" envconfig:"K6_NO_CONNECTION_REUSE"`
@@ -396,6 +319,9 @@ type Options struct {
 	// MinIterationDuration can be used to force VUs to pause between iterations if a specific
 	// iteration is shorter than the specified value.
 	MinIterationDuration types.NullDuration `json:"minIterationDuration" envconfig:"K6_MIN_ITERATION_DURATION"`
+
+	// Cloud is the configuration for the k6 Cloud.
+	Cloud json.RawMessage `json:"cloud,omitempty"`
 
 	// These values are for third party collectors' benefit.
 	// Can't be set through env vars.
@@ -411,8 +337,8 @@ type Options struct {
 	// Use pointer for identifying whether user provide any tag or not.
 	SystemTags *metrics.SystemTagSet `json:"systemTags" envconfig:"K6_SYSTEM_TAGS"`
 
-	// Tags to be applied to all samples for this running
-	RunTags *metrics.SampleTags `json:"tags" envconfig:"K6_TAGS"`
+	// Tags are key-value pairs to be applied to all samples for the run.
+	RunTags map[string]string `json:"tags" envconfig:"K6_TAGS"`
 
 	// Buffer size of the channel for metric samples; 0 means unbuffered
 	MetricSamplesBufferSize null.Int `json:"metricSamplesBufferSize" envconfig:"K6_METRIC_SAMPLES_BUFFER_SIZE"`
@@ -428,14 +354,21 @@ type Options struct {
 
 	// Specify client IP ranges and/or CIDR from which VUs will make requests
 	LocalIPs types.NullIPPool `json:"-" envconfig:"K6_LOCAL_IPS"`
+
+	// Features decodes the "features" key from the JSON config file (a resolution
+	// surface) and from the script's exported options (unsupported, warned about).
+	Features []string `json:"features" ignored:"true"`
 }
 
-// Returns the result of overwriting any fields with any that are set on the argument.
+// Apply returns the result of overwriting any fields with any that are set on the argument.
 //
 // Example:
-//   a := Options{VUs: null.IntFrom(10)}
-//   b := Options{VUs: null.IntFrom(5)}
-//   a.Apply(b) // Options{VUs: null.IntFrom(5)}
+//
+//	a := Options{VUs: null.IntFrom(10)}
+//	b := Options{VUs: null.IntFrom(5)}
+//	a.Apply(b) // Options{VUs: null.IntFrom(5)}
+//
+//nolint:funlen,gocognit,cyclop
 func (o Options) Apply(opts Options) Options {
 	if opts.Paused.Valid {
 		o.Paused = opts.Paused
@@ -445,7 +378,7 @@ func (o Options) Apply(opts Options) Options {
 	}
 
 	// Specifying duration, iterations, stages, or execution in a "higher" config tier
-	// will overwrite all of the the previous execution settings (if any) from any
+	// will overwrite all of the previous execution settings (if any) from any
 	// "lower" config tiers
 	// Still, if more than one of those options is simultaneously specified in the same
 	// config tier, they will be preserved, so the validation after we've consolidated
@@ -498,6 +431,9 @@ func (o Options) Apply(opts Options) Options {
 	if opts.TeardownTimeout.Valid {
 		o.TeardownTimeout = opts.TeardownTimeout
 	}
+	if opts.HandleSummaryTimeout.Valid {
+		o.HandleSummaryTimeout = opts.HandleSummaryTimeout
+	}
 	if opts.RPS.Valid {
 		o.RPS = opts.RPS
 	}
@@ -516,8 +452,14 @@ func (o Options) Apply(opts Options) Options {
 	if opts.HTTPDebug.Valid {
 		o.HTTPDebug = opts.HTTPDebug
 	}
+	if opts.HTTPDebugRedact.Valid {
+		o.HTTPDebugRedact = opts.HTTPDebugRedact
+	}
 	if opts.InsecureSkipTLSVerify.Valid {
 		o.InsecureSkipTLSVerify = opts.InsecureSkipTLSVerify
+	}
+	if opts.TLSAIAFetch.Valid {
+		o.TLSAIAFetch = opts.TLSAIAFetch
 	}
 	if opts.TLSCipherSuites != nil {
 		o.TLSCipherSuites = opts.TLSCipherSuites
@@ -540,7 +482,7 @@ func (o Options) Apply(opts Options) Options {
 	if opts.BlockedHostnames.Valid {
 		o.BlockedHostnames = opts.BlockedHostnames
 	}
-	if opts.Hosts != nil {
+	if opts.Hosts.Valid {
 		o.Hosts = opts.Hosts
 	}
 	if opts.NoConnectionReuse.Valid {
@@ -555,6 +497,9 @@ func (o Options) Apply(opts Options) Options {
 	if opts.NoCookiesReset.Valid {
 		o.NoCookiesReset = opts.NoCookiesReset
 	}
+	if opts.Cloud != nil {
+		o.Cloud = opts.Cloud
+	}
 	if opts.External != nil {
 		o.External = opts.External
 	}
@@ -567,7 +512,7 @@ func (o Options) Apply(opts Options) Options {
 	if opts.SystemTags != nil {
 		o.SystemTags = opts.SystemTags
 	}
-	if !opts.RunTags.IsEmpty() {
+	if len(opts.RunTags) > 0 {
 		o.RunTags = opts.RunTags
 	}
 	if opts.MetricSamplesBufferSize.Valid {
@@ -599,36 +544,39 @@ func (o Options) Apply(opts Options) Options {
 func (o Options) Validate() []error {
 	// TODO: validate all of the other options... that we should have already been validating...
 	// TODO: maybe integrate an external validation lib: https://github.com/avelino/awesome-go#validation
-	var errors []error
+	var validationErrors []error
 	if o.ExecutionSegmentSequence != nil {
 		var segmentFound bool
-		for _, segment := range *o.ExecutionSegmentSequence {
-			if o.ExecutionSegment.Equal(segment) {
-				segmentFound = true
-				break
-			}
+		if slices.ContainsFunc(*o.ExecutionSegmentSequence, o.ExecutionSegment.Equal) {
+			segmentFound = true
 		}
 		if !segmentFound {
-			errors = append(errors,
+			validationErrors = append(validationErrors,
 				fmt.Errorf("provided segment %s can't be found in sequence %s",
 					o.ExecutionSegment, o.ExecutionSegmentSequence))
 		}
 	}
-	return append(errors, o.Scenarios.Validate()...)
+	validationErrors = append(validationErrors, o.Scenarios.Validate()...)
+
+	// Duration
+	if o.SetupTimeout.Valid && o.SetupTimeout.Duration <= 0 {
+		validationErrors = append(validationErrors, errors.New("setupTimeout must be positive"))
+	}
+	return validationErrors
 }
 
 // ForEachSpecified enumerates all struct fields and calls the supplied function with each
 // element that is valid. It panics for any unfamiliar or unexpected fields, so make sure
 // new fields in Options are accounted for.
-func (o Options) ForEachSpecified(structTag string, callback func(key string, value interface{})) {
-	structType := reflect.TypeOf(o)
+func (o Options) ForEachSpecified(structTag string, callback func(key string, value any)) {
+	structType := reflect.TypeFor[Options]()
 	structVal := reflect.ValueOf(o)
 	for i := 0; i < structType.NumField(); i++ {
 		fieldType := structType.Field(i)
 		fieldVal := structVal.Field(i)
 		value := fieldVal.Interface()
 
-		shouldCall := false
+		var shouldCall bool
 		switch fieldType.Type.Kind() {
 		case reflect.Struct:
 			// Unpack any guregu/null values
@@ -644,7 +592,7 @@ func (o Options) ForEachSpecified(structTag string, callback func(key string, va
 			shouldCall = fieldVal.Len() > 0
 		case reflect.Map:
 			shouldCall = fieldVal.Len() > 0
-		case reflect.Ptr:
+		case reflect.Pointer:
 			shouldCall = !fieldVal.IsNil()
 		default:
 			panic(fmt.Sprintf("Unknown Options field %#v", fieldType))

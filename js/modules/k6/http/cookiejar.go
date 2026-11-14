@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -29,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
-	"go.k6.io/k6/js/common"
+	"github.com/grafana/sobek"
+
+	"go.k6.io/k6/v2/js/common"
 )
 
 // ErrJarForbiddenInInitContext is used when a cookie jar was made in the init context
@@ -40,7 +21,7 @@ var ErrJarForbiddenInInitContext = common.NewInitContextError("Making cookie jar
 // CookieJar is cookiejar.Jar wrapper to be used in js scripts
 type CookieJar struct {
 	moduleInstance *ModuleInstance
-	// js is to make it not be accessible from inside goja/js, the json is
+	// js is to make it not be accessible from inside Sobek/js, the json is
 	// for when it is returned from setup().
 	Jar *cookiejar.Jar `js:"-" json:"-"`
 }
@@ -61,7 +42,7 @@ func (j CookieJar) CookiesForURL(url string) map[string][]string {
 }
 
 // Set sets a cookie for a particular url with the given name value and additional opts
-func (j CookieJar) Set(url, name, value string, opts goja.Value) (bool, error) {
+func (j CookieJar) Set(url, name, value string, opts sobek.Value) (bool, error) {
 	rt := j.moduleInstance.vu.Runtime()
 
 	u, err := neturl.Parse(url)
@@ -69,9 +50,9 @@ func (j CookieJar) Set(url, name, value string, opts goja.Value) (bool, error) {
 		return false, err
 	}
 
-	c := http.Cookie{Name: name, Value: value}
+	c := http.Cookie{Name: name, Value: value} //nolint:gosec // outgoing request cookie, not a Set-Cookie response
 	paramsV := opts
-	if paramsV != nil && !goja.IsUndefined(paramsV) && !goja.IsNull(paramsV) {
+	if !common.IsNullish(paramsV) {
 		params := paramsV.ToObject(rt)
 		for _, k := range params.Keys() {
 			switch strings.ToLower(k) {
@@ -129,7 +110,7 @@ func (j CookieJar) Delete(url, name string) error {
 		return err
 	}
 
-	c := http.Cookie{Name: name, MaxAge: -1}
+	c := http.Cookie{Name: name, MaxAge: -1} //nolint:gosec // outgoing request cookie, not a Set-Cookie response
 	j.Jar.SetCookies(u, []*http.Cookie{&c})
 
 	return nil

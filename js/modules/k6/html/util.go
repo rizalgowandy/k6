@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package html
 
 import (
@@ -26,14 +6,14 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/serenize/snaker"
 	gohtml "golang.org/x/net/html"
 )
 
 func attrToProperty(s string) string {
-	if idx := strings.Index(s, "-"); idx != -1 {
-		return s[0:idx] + snaker.SnakeToCamel(strings.ReplaceAll(s[idx+1:], "-", "_"))
+	if before, after, ok := strings.Cut(s, "-"); ok {
+		return before + snaker.SnakeToCamel(strings.ReplaceAll(after, "-", "_"))
 	}
 	return s
 }
@@ -75,15 +55,15 @@ func getHTMLAttr(node *gohtml.Node, name string) *gohtml.Attribute {
 	return nil
 }
 
-func elemList(s Selection) (items []goja.Value) {
-	items = make([]goja.Value, s.Size())
+func elemList(s Selection) (items []sobek.Value) {
+	items = make([]sobek.Value, s.Size())
 	for i := 0; i < s.Size(); i++ {
 		items[i] = selToElement(s.Eq(i))
 	}
 	return items
 }
 
-func nodeToElement(e Element, node *gohtml.Node) goja.Value {
+func nodeToElement(e Element, node *gohtml.Node) sobek.Value {
 	// Goquery does not expose a way to build a goquery.Selection with an arbitrary html.Node.
 	// Workaround by adding a node to an empty Selection
 	emptySel := e.sel.emptySelection()
@@ -100,18 +80,17 @@ func toNumeric(val string) (float64, bool) {
 		return 0, false
 	} else if repr := strconv.FormatFloat(fltVal, 'f', -1, 64); repr == val {
 		return fltVal, true
-	} else {
-		return 0, false
 	}
+	return 0, false
 }
 
-func convertDataAttrVal(val string) interface{} {
+func convertDataAttrVal(val string) any {
 	if len(val) == 0 {
-		return goja.Undefined()
+		return sobek.Undefined()
 	}
 
 	if val[0] == '{' || val[0] == '[' {
-		var subdata interface{}
+		var subdata any
 
 		err := json.Unmarshal([]byte(val), &subdata)
 		if err == nil {
@@ -128,10 +107,10 @@ func convertDataAttrVal(val string) interface{} {
 		return false
 
 	case "null":
-		return goja.Undefined()
+		return sobek.Undefined()
 
 	case "undefined":
-		return goja.Undefined()
+		return sobek.Undefined()
 
 	default:
 		if fltVal, isOk := toNumeric(val); isOk {

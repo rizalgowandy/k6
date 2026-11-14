@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -26,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -38,8 +17,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
 // HTTPRequestCookie is a representation of a cookie used for request objects
@@ -48,7 +27,7 @@ type HTTPRequestCookie struct {
 	Replace     bool
 }
 
-// Request represent an http request
+// Request represents an HTTP request.
 type Request struct {
 	Method  string                          `json:"method"`
 	URL     string                          `json:"url"`
@@ -57,7 +36,7 @@ type Request struct {
 	Cookies map[string][]*HTTPRequestCookie `json:"cookies"`
 }
 
-// ParsedHTTPRequest a represantion of a request after it has been parsed from a user script
+// ParsedHTTPRequest is a representation of a request after it has been parsed from a user script.
 type ParsedHTTPRequest struct {
 	URL              *URL
 	Body             *bytes.Buffer
@@ -71,10 +50,10 @@ type ParsedHTTPRequest struct {
 	Redirects        null.Int
 	ActiveJar        *cookiejar.Jar
 	Cookies          map[string]*HTTPRequestCookie
-	Tags             map[string]string
+	TagsAndMeta      metrics.TagsAndMeta
 }
 
-// Matches non-compliant io.Closer implementations (e.g. zstd.Decoder)
+// ncloser matches non-compliant io.Closer implementations (e.g. zstd.Decoder).
 type ncloser interface {
 	Close()
 }
@@ -83,7 +62,7 @@ type readCloser struct {
 	io.Reader
 }
 
-// Close readers with differing Close() implementations
+// Close closes readers with differing Close() implementations.
 func (r readCloser) Close() error {
 	var err error
 	switch v := r.Reader.(type) {
@@ -127,10 +106,11 @@ func updateK6Response(k6Response *Response, finishedReq *finishedRequest) {
 	}
 }
 
-// MakeRequest makes http request for tor the provided ParsedHTTPRequest.
+// MakeRequest makes an HTTP request for the provided ParsedHTTPRequest.
 //
 // TODO: split apart...
-// nolint: cyclop, gocyclo, funlen, gocognit
+//
+//nolint:cyclop, gocyclo, funlen, gocognit, nestif
 func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest) (*Response, error) {
 	respReq := &Request{
 		Method:  preq.Req.Method,
@@ -145,7 +125,7 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		respReq.Body = preq.Body.String()
 
 		if len(preq.Compressions) > 0 {
-			compressedBody, contentEncoding, err := compressBody(preq.Compressions, ioutil.NopCloser(preq.Body))
+			compressedBody, contentEncoding, err := compressBody(preq.Compressions, io.NopCloser(preq.Body))
 			if err != nil {
 				return nil, err
 			}
@@ -167,7 +147,7 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		preq.Req.GetBody = func() (io.ReadCloser, error) {
 			//  using `Bytes()` should reuse the same buffer and as such help with the memory usage. We
 			//  should not be writing to it any way so there shouldn't be way to corrupt it (?)
-			return ioutil.NopCloser(bytes.NewBuffer(preq.Body.Bytes())), nil
+			return io.NopCloser(bytes.NewBuffer(preq.Body.Bytes())), nil
 		}
 		// as per the documentation using GetBody still requires setting the Body.
 		preq.Req.Body, _ = preq.Req.GetBody()
@@ -187,17 +167,11 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		}
 	}
 
-	tags := state.CloneTags()
-	// Override any global tags with request-specific ones.
-	for k, v := range preq.Tags {
-		tags[k] = v
-	}
-
 	// Only set the name system tag if the user didn't explicitly set it beforehand,
 	// and the Name was generated from a tagged template string (via http.url).
-	if _, ok := tags["name"]; !ok && state.Options.SystemTags.Has(metrics.TagName) &&
-		preq.URL.Name != "" && preq.URL.Name != preq.URL.Clean() {
-		tags["name"] = preq.URL.Name
+	if _, ok := preq.TagsAndMeta.Tags.Get(metrics.TagName.String()); !ok &&
+		state.Options.SystemTags.Has(metrics.TagName) && preq.URL.Name != "" && preq.URL.Name != preq.URL.Clean() {
+		preq.TagsAndMeta.SetSystemTagOrMeta(metrics.TagName, preq.URL.Name)
 	}
 
 	// Check rate limit *after* we've prepared a request; no need to wait with that part.
@@ -207,37 +181,52 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		}
 	}
 
-	tracerTransport := newTransport(ctx, state, tags, preq.ResponseCallback)
+	tracerTransport := newTransport(ctx, state, &preq.TagsAndMeta, preq.ResponseCallback)
 	var transport http.RoundTripper = tracerTransport
 
-	// Combine tags with common log fields
-	combinedLogFields := map[string]interface{}{"source": "http-debug", "vu": state.VUID, "iter": state.Iteration}
-	for k, v := range tags {
-		if _, present := combinedLogFields[k]; !present {
-			combinedLogFields[k] = v
-		}
-	}
-
 	if state.Options.HTTPDebug.String != "" {
+		// Combine tags with common log fields
+		combinedLogFields := map[string]any{"source": "http-debug", "vu": state.VUID, "iter": state.Iteration}
+		for k, v := range preq.TagsAndMeta.Metadata {
+			if _, present := combinedLogFields[k]; !present {
+				combinedLogFields[k] = v
+			}
+		}
+		for k, v := range preq.TagsAndMeta.Tags.Map() {
+			if _, present := combinedLogFields[k]; !present {
+				combinedLogFields[k] = v
+			}
+		}
 		transport = httpDebugTransport{
 			originalTransport: transport,
 			httpDebugOption:   state.Options.HTTPDebug.String,
+			redact:            state.Options.HTTPDebugRedact.Bool,
 			logger:            state.Logger.WithFields(combinedLogFields),
 		}
 	}
 
-	if preq.Auth == "digest" {
-		// Until digest authentication is refactored, the first response will always
-		// be a 401 error, so we expect that.
+	switch preq.Auth {
+	case "digest":
+		// The first request may be answered with a 401 challenge before the
+		// authenticated retry, so we expect that as a possible outcome.
 		if tracerTransport.responseCallback != nil {
 			originalResponseCallback := tracerTransport.responseCallback
 			tracerTransport.responseCallback = func(status int) bool {
 				tracerTransport.responseCallback = originalResponseCallback
-				return status == 401
+				return status == 401 || originalResponseCallback(status)
 			}
 		}
-		transport = digestTransport{originalTransport: transport}
-	} else if preq.Auth == "ntlm" {
+
+		username := preq.URL.GetURL().User.Username()
+		password, _ := preq.URL.GetURL().User.Password()
+
+		// Remove the user data from the URL to avoid sending the Authorization
+		// header for basic auth. ToURL always hands out a per-request copy of the
+		// *url.URL, so this cannot mutate a URL shared via http.url (#6397).
+		preq.URL.GetURL().User = nil
+
+		transport = newDigestTransport(transport, username, password, state.Logger)
+	case "ntlm":
 		// The first response of NTLM auth may be a 401 error.
 		if tracerTransport.responseCallback != nil {
 			originalResponseCallback := tracerTransport.responseCallback
@@ -250,7 +239,12 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		transport = ntlmssp.Negotiator{RoundTripper: transport}
 	}
 
-	resp := &Response{URL: preq.URL.URL, Request: respReq}
+	resp := &Response{
+		URL:     preq.URL.URL,
+		Request: respReq,
+		Headers: make(map[string]string),
+		Cookies: make(map[string][]*HTTPCookie),
+	}
 	client := http.Client{
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -365,6 +359,7 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 func SetRequestCookies(req *http.Request, jar *cookiejar.Jar, reqCookies map[string]*HTTPRequestCookie) {
 	replacedCookies := make(map[string]struct{})
 	for key, reqCookie := range reqCookies {
+		//nolint:gosec // outgoing request cookie, not a Set-Cookie response
 		req.AddCookie(&http.Cookie{Name: key, Value: reqCookie.Value})
 		if reqCookie.Replace {
 			replacedCookies[key] = struct{}{}
@@ -372,6 +367,7 @@ func SetRequestCookies(req *http.Request, jar *cookiejar.Jar, reqCookies map[str
 	}
 	for _, c := range jar.Cookies(req.URL) {
 		if _, ok := replacedCookies[c.Name]; !ok {
+			//nolint:gosec // outgoing request cookie, not a Set-Cookie response
 			req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
 		}
 	}

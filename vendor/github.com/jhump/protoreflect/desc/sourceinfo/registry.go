@@ -19,40 +19,62 @@
 // following snippet demonstrates how to do this in your server. Do this instead of
 // using the reflection.Register function:
 //
-//    refSvr := reflection.NewServer(reflection.ServerOptions{
-//        Services:           grpcServer,
-//        DescriptorResolver: sourceinfo.GlobalFiles,
-//        ExtensionResolver:  sourceinfo.GlobalFiles,
-//    })
-//    grpc_reflection_v1alpha.RegisterServerReflectionServer(grpcServer, refSvr)
-//
+//	refSvr := reflection.NewServer(reflection.ServerOptions{
+//	    Services:           grpcServer,
+//	    DescriptorResolver: sourceinfo.GlobalFiles,
+//	    ExtensionResolver:  sourceinfo.GlobalFiles,
+//	})
+//	grpc_reflection_v1alpha.RegisterServerReflectionServer(grpcServer, refSvr)
 package sourceinfo
 
 import (
-	"fmt"
-	"sync"
+	"bytes"
+	"compress/gzip"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/jhump/protoreflect/v2/sourceinfo"
 )
 
 var (
 	// GlobalFiles is a registry of descriptors that include source code info, if the
-	// file they belong to were processed with protoc-gen-gosrcinfo.
+	// files they belong to were processed with protoc-gen-gosrcinfo.
 	//
 	// If is mean to serve as a drop-in alternative to protoregistry.GlobalFiles that
 	// can include source code info in the returned descriptors.
 	GlobalFiles Resolver = registry{}
 
-	mu               sync.RWMutex
-	sourceInfoByFile = map[string]*descriptorpb.SourceCodeInfo{}
-	fileDescriptors  = map[protoreflect.FileDescriptor]protoreflect.FileDescriptor{}
+	// GlobalTypes is a registry of descriptors that include source code info, if the
+	// files they belong to were processed with protoc-gen-gosrcinfo.
+	//
+	// If is mean to serve as a drop-in alternative to protoregistry.GlobalTypes that
+	// can include source code info in the returned descriptors.
+	GlobalTypes TypeResolver = registry{}
 )
 
+// Resolver can resolve file names into file descriptors and also provides methods for
+// resolving extensions.
 type Resolver interface {
 	protodesc.Resolver
+	protoregistry.ExtensionTypeResolver
+	RangeExtensionsByMessage(message protoreflect.FullName, f func(protoreflect.ExtensionType) bool)
+}
+
+// NB: These interfaces are far from ideal. Ideally, Resolver would have
+//    * EITHER been named FileResolver and not included the extension methods.
+//    * OR also included message methods (i.e. embed protoregistry.MessageTypeResolver).
+//   Now (since it's been released) we can't add the message methods to the interface as
+//   that's not a backwards-compatible change. So we have to introduce the new interface
+//   below, which is now a little confusing since it has some overlap with Resolver.
+
+// TypeResolver can resolve message names and URLs into message descriptors and also
+// provides methods for resolving extensions.
+type TypeResolver interface {
+	protoregistry.MessageTypeResolver
 	protoregistry.ExtensionTypeResolver
 	RangeExtensionsByMessage(message protoreflect.FullName, f func(protoreflect.ExtensionType) bool)
 }
@@ -60,58 +82,35 @@ type Resolver interface {
 // RegisterSourceInfo registers the given source code info for the file descriptor
 // with the given path/name.
 //
+// This is automatically used from older generated code if using a previous release of
+// the protoc-gen-gosrcinfo plugin.
+func RegisterSourceInfo(file string, srcInfo *descriptorpb.SourceCodeInfo) {
+	siBytes, _ := proto.Marshal(srcInfo)
+	var encodedBuf bytes.Buffer
+	zipWriter := gzip.NewWriter(&encodedBuf)
+	_, _ = zipWriter.Write(siBytes)
+	_ = zipWriter.Close()
+	encodedBytes := encodedBuf.Bytes()
+
+	sourceinfo.Register(file, encodedBytes)
+}
+
+// RegisterEncodedSourceInfo registers the given source code info, which is a serialized
+// and gzipped form of a google.protobuf.SourceCodeInfo message.
+//
 // This is automatically used from generated code if using the protoc-gen-gosrcinfo
 // plugin.
-func RegisterSourceInfo(file string, srcInfo *descriptorpb.SourceCodeInfo) {
-	mu.Lock()
-	defer mu.Unlock()
-	sourceInfoByFile[file] = srcInfo
+func RegisterEncodedSourceInfo(file string, data []byte) error {
+	sourceinfo.Register(file, data)
+	return nil
 }
 
 // SourceInfoForFile queries for any registered source code info for the file
 // descriptor with the given path/name. It returns nil if no source code info
 // was registered.
 func SourceInfoForFile(file string) *descriptorpb.SourceCodeInfo {
-	mu.RLock()
-	defer mu.RUnlock()
-	return sourceInfoByFile[file]
-}
-
-func getFile(fd protoreflect.FileDescriptor) protoreflect.FileDescriptor {
-	if fd == nil {
-		return nil
-	}
-
-	mu.RLock()
-	result := fileDescriptors[fd]
-	mu.RUnlock()
-
-	if result != nil {
-		return result
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	// double-check, in case it was added to map while upgrading lock
-	result = fileDescriptors[fd]
-	if result != nil {
-		return result
-	}
-
-	srcInfo := sourceInfoByFile[fd.Path()]
-	if len(srcInfo.GetLocation()) > 0 {
-		result = &fileDescriptor{
-			FileDescriptor: fd,
-			locs: &sourceLocations{
-				orig: srcInfo.Location,
-			},
-		}
-	} else {
-		// nothing to do; don't bother wrapping
-		result = fd
-	}
-	fileDescriptors[fd] = result
-	return result
+	ret, _ := sourceinfo.ForFile(file)
+	return ret
 }
 
 type registry struct{}
@@ -119,60 +118,29 @@ type registry struct{}
 var _ protodesc.Resolver = &registry{}
 
 func (r registry) FindFileByPath(path string) (protoreflect.FileDescriptor, error) {
-	fd, err := protoregistry.GlobalFiles.FindFileByPath(path)
-	if err != nil {
-		return nil, err
-	}
-	return getFile(fd), nil
+	return sourceinfo.Files.FindFileByPath(path)
 }
 
 func (r registry) FindDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
-	d, err := protoregistry.GlobalFiles.FindDescriptorByName(name)
-	if err != nil {
-		return nil, err
-	}
-	switch d := d.(type) {
-	case protoreflect.FileDescriptor:
-		return getFile(d), nil
-	case protoreflect.MessageDescriptor:
-		return messageDescriptor{d}, nil
-	case protoreflect.ExtensionTypeDescriptor:
-		return extensionDescriptor{d}, nil
-	case protoreflect.FieldDescriptor:
-		return fieldDescriptor{d}, nil
-	case protoreflect.OneofDescriptor:
-		return oneOfDescriptor{d}, nil
-	case protoreflect.EnumDescriptor:
-		return enumDescriptor{d}, nil
-	case protoreflect.EnumValueDescriptor:
-		return enumValueDescriptor{d}, nil
-	case protoreflect.ServiceDescriptor:
-		return serviceDescriptor{d}, nil
-	case protoreflect.MethodDescriptor:
-		return methodDescriptor{d}, nil
-	default:
-		return nil, fmt.Errorf("unrecognized descriptor type: %T", d)
-	}
+	return sourceinfo.Files.FindDescriptorByName(name)
+}
+
+func (r registry) FindMessageByName(message protoreflect.FullName) (protoreflect.MessageType, error) {
+	return sourceinfo.Types.FindMessageByName(message)
+}
+
+func (r registry) FindMessageByURL(url string) (protoreflect.MessageType, error) {
+	return sourceinfo.Types.FindMessageByURL(url)
 }
 
 func (r registry) FindExtensionByName(field protoreflect.FullName) (protoreflect.ExtensionType, error) {
-	xt, err := protoregistry.GlobalTypes.FindExtensionByName(field)
-	if err != nil {
-		return nil, err
-	}
-	return extensionType{xt}, nil
+	return sourceinfo.Types.FindExtensionByName(field)
 }
 
 func (r registry) FindExtensionByNumber(message protoreflect.FullName, field protoreflect.FieldNumber) (protoreflect.ExtensionType, error) {
-	xt, err := protoregistry.GlobalTypes.FindExtensionByNumber(message, field)
-	if err != nil {
-		return nil, err
-	}
-	return extensionType{xt}, nil
+	return sourceinfo.Types.FindExtensionByNumber(message, field)
 }
 
 func (r registry) RangeExtensionsByMessage(message protoreflect.FullName, fn func(protoreflect.ExtensionType) bool) {
-	protoregistry.GlobalTypes.RangeExtensionsByMessage(message, func(xt protoreflect.ExtensionType) bool {
-		return fn(extensionType{xt})
-	})
+	sourceinfo.Types.RangeExtensionsByMessage(message, fn)
 }

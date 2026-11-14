@@ -27,15 +27,37 @@ func NewReader(src io.Reader) *Reader {
 }
 
 // Reset discards the Reader's state and makes it equivalent to the result of
-// its original state from NewReader, but writing to src instead.
+// its original state from NewReader, but reading from src instead.
 // This permits reusing a Reader rather than allocating a new one.
 // Error is always nil
 func (r *Reader) Reset(src io.Reader) error {
+	if r.error_code < 0 {
+		// There was an unrecoverable error, leaving the Reader's state
+		// undefined. Clear out everything but the buffers.
+		*r = Reader{
+			buf:              r.buf,
+			block_type_trees: r.block_type_trees,
+			literal_hgroup: huffmanTreeGroup{
+				htrees: r.literal_hgroup.htrees,
+				codes:  r.literal_hgroup.codes,
+			},
+			distance_hgroup: huffmanTreeGroup{
+				htrees: r.distance_hgroup.htrees,
+				codes:  r.distance_hgroup.codes,
+			},
+			insert_copy_hgroup: huffmanTreeGroup{
+				htrees: r.insert_copy_hgroup.htrees,
+				codes:  r.insert_copy_hgroup.codes,
+			},
+		}
+	}
+
 	decoderStateInit(r)
 	r.src = src
 	if r.buf == nil {
 		r.buf = make([]byte, readBufSize)
 	}
+	r.in = r.buf[:0]
 	return nil
 }
 
@@ -43,6 +65,9 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 	if !decoderHasMoreOutput(r) && len(r.in) == 0 {
 		m, readErr := r.src.Read(r.buf)
 		if m == 0 {
+			if readErr == io.EOF && r.state != stateDone {
+				readErr = io.ErrUnexpectedEOF
+			}
 			// If readErr is `nil`, we just proxy underlying stream behavior.
 			return 0, readErr
 		}
@@ -65,7 +90,7 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 
 		switch result {
 		case decoderResultSuccess:
-			if len(r.in) > 0 {
+			if len(r.in) > 0 || r.buffer_length > 0 {
 				return n, errExcessiveInput
 			}
 			return n, nil

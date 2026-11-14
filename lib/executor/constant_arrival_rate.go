@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -32,10 +12,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/ui/pb"
+	"go.k6.io/k6/v2/internal/ui/pb"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/lib/types"
+	"go.k6.io/k6/v2/metrics"
 )
 
 const constantArrivalRateType = "constant-arrival-rate"
@@ -153,8 +133,8 @@ func (carc ConstantArrivalRateConfig) GetExecutionRequirements(et *lib.Execution
 	return []lib.ExecutionStep{
 		{
 			TimeOffset:      0,
-			PlannedVUs:      uint64(et.ScaleInt64(carc.PreAllocatedVUs.Int64)),
-			MaxUnplannedVUs: uint64(et.ScaleInt64(carc.MaxVUs.Int64) - et.ScaleInt64(carc.PreAllocatedVUs.Int64)),
+			PlannedVUs:      uint64(et.ScaleInt64(carc.PreAllocatedVUs.Int64)),                                    //nolint:gosec
+			MaxUnplannedVUs: uint64(et.ScaleInt64(carc.MaxVUs.Int64) - et.ScaleInt64(carc.PreAllocatedVUs.Int64)), //nolint:gosec
 		}, {
 			TimeOffset:      carc.Duration.TimeDuration() + carc.GracefulStop.TimeDuration(),
 			PlannedVUs:      0,
@@ -190,10 +170,10 @@ type ConstantArrivalRate struct {
 var _ lib.Executor = &ConstantArrivalRate{}
 
 // Init values needed for the execution
-func (car *ConstantArrivalRate) Init(ctx context.Context) error {
+func (car *ConstantArrivalRate) Init(_ context.Context) error {
 	// err should always be nil, because Init() won't be called for executors
 	// with no work, as determined by their config's HasWork() method.
-	et, err := car.BaseExecutor.executionState.ExecutionTuple.GetNewExecutionTupleFromValue(car.config.MaxVUs.Int64)
+	et, err := car.executionState.ExecutionTuple.GetNewExecutionTupleFromValue(car.config.MaxVUs.Int64)
 	car.et = et
 	car.iterSegIndex = lib.NewSegmentedIndex(et)
 
@@ -210,7 +190,8 @@ func (car *ConstantArrivalRate) Init(ctx context.Context) error {
 // time should iteration X begin) different, but keep everything else the same.
 // This will allow us to implement https://github.com/k6io/k6/issues/1386
 // and things like all of the TODOs below in one place only.
-//nolint:funlen,cyclop
+//
+//nolint:funlen
 func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	gracefulStop := car.config.GetGracefulStop()
 	duration := car.config.Duration.TimeDuration()
@@ -231,13 +212,14 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 
 	returnedVUs := make(chan struct{})
 	waitOnProgressChannel := make(chan struct{})
-	startTime, maxDurationCtx, regDurationCtx, cancel := getDurationContexts(parentCtx, duration, gracefulStop)
+	startTime, maxDurationCtx, regDurationCtx, cancel, regCancel := getDurationContexts(parentCtx, duration, gracefulStop)
 	defer func() {
 		cancel()
+		regCancel()
 		<-waitOnProgressChannel
 	}()
 
-	vusPool := newActiveVUPool()
+	vusPool := newActiveVUPool(car.executionState)
 	defer func() {
 		// Make sure all VUs aren't executing iterations anymore, for the cancel()
 		// below to deactivate them.
@@ -284,7 +266,11 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 	}()
 
 	returnVU := func(u lib.InitializedVU) {
-		car.executionState.ReturnVU(u, true)
+		// Return the VU without decreasing the global active VU counter, which
+		// is done in the goroutine started by activeVUPool.AddVU, whenever the
+		// VU finishes running an iteration. This results in a more accurate
+		// report of VUs that are _actually_ active.
+		car.executionState.ReturnVU(u, false)
 		activeVUsWg.Done()
 	}
 
@@ -295,7 +281,6 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 			maxDurationCtx, car.config.BaseConfig, returnVU,
 			car.nextIterationCounters,
 		))
-		car.executionState.ModCurrentlyActiveVUsCount(+1)
 		atomic.AddUint64(&activeVUsCount, 1)
 		vusPool.AddVU(maxDurationCtx, activeVU, runIterationBasic)
 		return activeVU
@@ -320,7 +305,7 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 	}()
 
 	// Get the pre-allocated VUs in the local buffer
-	for i := int64(0); i < preAllocatedVUs; i++ {
+	for range preAllocatedVUs {
 		initVU, err := car.executionState.GetPlannedVU(car.logger, false)
 		if err != nil {
 			return err
@@ -337,7 +322,7 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 			int64(car.config.TimeUnit.TimeDuration()),
 		)).TimeDuration()
 
-	droppedIterationMetric := car.executionState.BuiltinMetrics.DroppedIterations
+	droppedIterationMetric := car.executionState.Test.BuiltinMetrics.DroppedIterations
 	shownWarning := false
 	metricTags := car.getMetricTags(nil)
 	for li, gi := 0, start; ; li, gi = li+1, gi+offsets[li%len(offsets)] {
@@ -353,8 +338,12 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 			// dropped - we aren't going to try to recover it, but
 
 			metrics.PushIfNotDone(parentCtx, out, metrics.Sample{
-				Value: 1, Metric: droppedIterationMetric,
-				Tags: metricTags, Time: time.Now(),
+				TimeSeries: metrics.TimeSeries{
+					Metric: droppedIterationMetric,
+					Tags:   metricTags,
+				},
+				Time:  time.Now(),
+				Value: 1,
 			})
 
 			// We'll try to start allocating another VU in the background,

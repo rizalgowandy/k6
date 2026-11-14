@@ -1,23 +1,4 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
+// Package executor defines the executors k6 can use.
 package executor
 
 import (
@@ -27,9 +8,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/ui/pb"
+	"go.k6.io/k6/v2/internal/ui/pb"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
 // BaseExecutor is a helper struct that contains common properties and methods
@@ -66,7 +47,7 @@ func (bs *BaseExecutor) nextIterationCounters() (uint64, uint64) {
 	bs.iterSegIndexMx.Lock()
 	defer bs.iterSegIndexMx.Unlock()
 	scaled, unscaled := bs.iterSegIndex.Next()
-	return uint64(scaled - 1), uint64(unscaled - 1)
+	return uint64(scaled - 1), uint64(unscaled - 1) //nolint:gosec
 }
 
 // Init doesn't do anything for most executors, since initialization of all
@@ -92,13 +73,13 @@ func (bs *BaseExecutor) GetProgress() *pb.ProgressBar {
 
 // getMetricTags returns a tag set that can be used to emit metrics by the
 // executor. The VU ID is optional.
-func (bs *BaseExecutor) getMetricTags(vuID *uint64) *metrics.SampleTags {
-	tags := bs.executionState.Options.RunTags.CloneTags()
-	if bs.executionState.Options.SystemTags.Has(metrics.TagScenario) {
-		tags["scenario"] = bs.config.GetName()
+func (bs *BaseExecutor) getMetricTags(vuID *uint64) *metrics.TagSet {
+	tags := bs.executionState.Test.RunTags
+	if bs.executionState.Test.Options.SystemTags.Has(metrics.TagScenario) {
+		tags = tags.With("scenario", bs.config.GetName())
 	}
-	if vuID != nil && bs.executionState.Options.SystemTags.Has(metrics.TagVU) {
-		tags["vu"] = strconv.FormatUint(*vuID, 10)
+	if vuID != nil && bs.executionState.Test.Options.SystemTags.Has(metrics.TagVU) {
+		tags = tags.With("vu", strconv.FormatUint(*vuID, 10))
 	}
-	return metrics.IntoSampleTags(&tags)
+	return tags
 }

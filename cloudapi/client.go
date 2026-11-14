@@ -1,37 +1,19 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cloudapi
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"go.k6.io/k6/v2/internal/cloudapi/httperr"
 )
 
 const (
@@ -40,13 +22,14 @@ const (
 	// MaxRetries specifies max retry attempts
 	MaxRetries = 3
 
-	k6IdempotencyKeyHeader = "k6-Idempotency-Key"
+	k6IdempotencyKeyHeader = "K6-Idempotency-Key"
 )
 
-// Client handles communication with Load Impact cloud API.
+// Client handles communication with the k6 Cloud API.
 type Client struct {
 	client  *http.Client
 	token   string
+	stackID int64
 	baseURL string
 	version string
 
@@ -70,11 +53,21 @@ func NewClient(logger logrus.FieldLogger, token, host, version string, timeout t
 	return c
 }
 
+// SetStackID sets the stack ID for the client.
+func (c *Client) SetStackID(stackID int64) {
+	c.stackID = stackID
+}
+
+// BaseURL returns configured host.
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
 // NewRequest creates new HTTP request.
 //
 // This is the same as http.NewRequest, except that data if not nil
 // will be serialized in json format.
-func (c *Client) NewRequest(method, url string, data interface{}) (*http.Request, error) {
+func (c *Client) NewRequest(method, url string, data any) (*http.Request, error) {
 	var buf io.Reader
 
 	if data != nil {
@@ -86,7 +79,7 @@ func (c *Client) NewRequest(method, url string, data interface{}) (*http.Request
 		buf = bytes.NewBuffer(b)
 	}
 
-	req, err := http.NewRequest(method, url, buf)
+	req, err := http.NewRequest(method, url, buf) //nolint:noctx // the user can add this
 	if err != nil {
 		return nil, err
 	}
@@ -94,9 +87,10 @@ func (c *Client) NewRequest(method, url string, data interface{}) (*http.Request
 	return req, nil
 }
 
-func (c *Client) Do(req *http.Request, v interface{}) error {
+// Do is simpler to http.Do but also unmarshals the response in the provided v
+func (c *Client) Do(req *http.Request, v any) error {
 	if req.Body != nil && req.GetBody == nil {
-		originalBody, err := ioutil.ReadAll(req.Body)
+		originalBody, err := io.ReadAll(req.Body)
 		if err != nil {
 			return err
 		}
@@ -105,7 +99,7 @@ func (c *Client) Do(req *http.Request, v interface{}) error {
 		}
 
 		req.GetBody = func() (io.ReadCloser, error) {
-			return ioutil.NopCloser(bytes.NewReader(originalBody)), nil
+			return io.NopCloser(bytes.NewReader(originalBody)), nil
 		}
 		req.Body, _ = req.GetBody()
 	}
@@ -117,7 +111,14 @@ func (c *Client) Do(req *http.Request, v interface{}) error {
 		retry, err := c.do(req, v, i)
 
 		if retry {
-			time.Sleep(c.retryInterval)
+			// Wait before retrying, but give up as soon as the request's
+			// context is done so a canceled or timed-out call returns at once
+			// instead of sleeping through the remaining attempts.
+			select {
+			case <-req.Context().Done():
+				return req.Context().Err()
+			case <-time.After(c.retryInterval):
+			}
 			if req.GetBody != nil {
 				req.Body, _ = req.GetBody()
 			}
@@ -144,13 +145,18 @@ func (c *Client) prepareHeaders(req *http.Request) {
 	}
 
 	req.Header.Set("User-Agent", "k6cloud/"+c.version)
+
+	if c.stackID != 0 {
+		req.Header.Set("X-Stack-Id", strconv.FormatInt(c.stackID, 10))
+	}
 }
 
-func (c *Client) do(req *http.Request, v interface{}, attempt int) (retry bool, err error) {
+func (c *Client) do(req *http.Request, v any, attempt int) (retry bool, err error) {
 	resp, err := c.client.Do(req)
 
 	defer func() {
 		if resp != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
 			if cerr := resp.Body.Close(); cerr != nil && err == nil {
 				err = cerr
 			}
@@ -165,12 +171,12 @@ func (c *Client) do(req *http.Request, v interface{}, attempt int) (retry bool, 
 		return false, err
 	}
 
-	if err = checkResponse(resp); err != nil {
+	if err = CheckResponse(resp); err != nil {
 		return false, err
 	}
 
 	if v != nil {
-		if err = json.NewDecoder(resp.Body).Decode(v); err == io.EOF {
+		if err = json.NewDecoder(resp.Body).Decode(v); errors.Is(err, io.EOF) {
 			err = nil // Ignore EOF from empty body
 		}
 	}
@@ -178,29 +184,29 @@ func (c *Client) do(req *http.Request, v interface{}, attempt int) (retry bool, 
 	return false, err
 }
 
-func checkResponse(r *http.Response) error {
+// CheckResponse checks the parsed response.
+// It returns nil if the code is in the successful range,
+// otherwise it tries to parse the body and return a parsed error.
+func CheckResponse(r *http.Response) error {
 	if r == nil {
-		return ErrUnknown
+		return errUnknown
 	}
 
 	if c := r.StatusCode; c >= 200 && c <= 299 {
 		return nil
 	}
 
-	data, err := ioutil.ReadAll(r.Body)
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
 	}
 
 	var payload struct {
-		Error ErrorResponse `json:"error"`
+		Error ResponseError `json:"error"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		if r.StatusCode == http.StatusUnauthorized {
-			return ErrNotAuthenticated
-		}
-		if r.StatusCode == http.StatusForbidden {
-			return ErrNotAuthorized
+		if classified := httperr.ClassifyStatus(r.StatusCode); classified != nil {
+			return classified
 		}
 		return fmt.Errorf(
 			"unexpected HTTP error from %s: %d %s",
@@ -222,7 +228,7 @@ func shouldRetry(resp *http.Response, err error, attempt, maxAttempts int) bool 
 		return true
 	}
 
-	if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 		return true
 	}
 
@@ -240,14 +246,9 @@ func shouldAddIdempotencyKey(req *http.Request) bool {
 
 // randomStrHex returns a hex string which can be used
 // for session token id or idempotency key.
-//nolint:gosec
 func randomStrHex() string {
 	// 16 hex characters
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
 }

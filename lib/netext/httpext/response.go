@@ -1,34 +1,14 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
 	"crypto/tls"
 
-	"go.k6.io/k6/lib/netext"
+	"go.k6.io/k6/v2/lib/netext"
 )
 
 // ResponseType is used in the request to specify how the response body should be treated
 // The conversion and validation methods are auto-generated with https://github.com/alvaroloes/enumer:
-//nolint: lll
+//
 //go:generate enumer -type=ResponseType -transform=snake -json -text -trimprefix ResponseType -output response_type_gen.go
 type ResponseType uint
 
@@ -81,7 +61,7 @@ type Response struct {
 	Proto          string                   `json:"proto"`
 	Headers        map[string]string        `json:"headers"`
 	Cookies        map[string][]*HTTPCookie `json:"cookies"`
-	Body           interface{}              `json:"body"`
+	Body           any                      `json:"body"`
 	Timings        ResponseTimings          `json:"timings"`
 	TLSVersion     string                   `json:"tls_version"`
 	TLSCipherSuite string                   `json:"tls_cipher_suite"`
@@ -94,7 +74,9 @@ type Response struct {
 // NewResponse returns an empty Response instance.
 func NewResponse() *Response {
 	return &Response{
-		Body: []byte{},
+		Headers: make(map[string]string),
+		Cookies: make(map[string][]*HTTPCookie),
+		Body:    []byte{},
 	}
 }
 

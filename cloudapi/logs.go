@@ -1,30 +1,11 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cloudapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand" // nosemgrep: math-random-used // This is being used retry jitter
 	"net/http"
 	"net/url"
 	"strconv"
@@ -33,25 +14,19 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/mailru/easyjson"
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate easyjson -pkg -no_std_marshalers -gen_build_flags -mod=mod .
-
-//easyjson:json
 type msg struct {
 	Streams        []msgStreams        `json:"streams"`
 	DroppedEntries []msgDroppedEntries `json:"dropped_entries"`
 }
 
-//easyjson:json
 type msgStreams struct {
 	Stream map[string]string `json:"stream"`
 	Values [][2]string       `json:"values"` // this can be optimized
 }
 
-//easyjson:json
 type msgDroppedEntries struct {
 	Labels    map[string]string `json:"labels"`
 	Timestamp string            `json:"timestamp"`
@@ -119,7 +94,8 @@ func (c *Config) logtailConn(ctx context.Context, referenceID string, since time
 	u.RawQuery = fmt.Sprintf(`query={test_run_id="%s"}&start=%d`, referenceID, since.UnixNano())
 
 	headers := make(http.Header)
-	headers.Add("Sec-WebSocket-Protocol", "token="+c.Token.String)
+	headers.Add("Authorization", "token "+c.Token.String)
+	headers.Add("X-K6testrun-Id", referenceID)
 
 	var conn *websocket.Conn
 	err = retry(sleeperFunc(time.Sleep), 3, 5*time.Second, 2*time.Minute, func() (err error) {
@@ -163,18 +139,18 @@ func (c *Config) StreamLogsToLogger(
 	msgBuffer := make(chan []byte, 10)
 	defer close(msgBuffer)
 
-	var mostRecent int64
+	var mostRecent atomic.Int64
 	go func() {
 		for message := range msgBuffer {
 			var m msg
-			err := easyjson.Unmarshal(message, &m)
+			err := json.Unmarshal(message, &m)
 			if err != nil {
 				logger.WithError(err).Errorf("couldn't unmarshal a message from the cloud: %s", string(message))
 
 				continue
 			}
 			ts := m.Log(logger)
-			atomic.StoreInt64(&mostRecent, ts)
+			mostRecent.Store(ts)
 		}
 	}()
 
@@ -190,7 +166,7 @@ func (c *Config) StreamLogsToLogger(
 			logger.WithError(err).Warn("error reading a log message from the cloud, trying to establish a fresh connection with the logs service...") //nolint:lll
 
 			var since time.Time
-			if ts := atomic.LoadInt64(&mostRecent); ts > 0 {
+			if ts := mostRecent.Load(); ts > 0 {
 				// add 1ns for avoid possible repetition
 				since = time.Unix(0, ts).Add(time.Nanosecond)
 			} else {
@@ -242,18 +218,18 @@ func (sfn sleeperFunc) Sleep(d time.Duration) {
 // between the latest iteration and the next retry.
 // Interval is used as the base to compute an exponential backoff,
 // if the computed interval overtakes the max interval then max will be used.
-func retry(s sleeper, attempts uint, interval, max time.Duration, do func() error) (err error) {
+func retry(s sleeper, attempts int, interval, maxDuration time.Duration, do func() error) (err error) {
 	baseInterval := math.Abs(interval.Truncate(time.Second).Seconds())
 	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
 
-	for i := 0; i < int(attempts); i++ {
+	for i := range attempts {
 		if i > 0 {
 			// wait = (interval ^ i) + random milliseconds
 			wait := time.Duration(math.Pow(baseInterval, float64(i))) * time.Second
 			wait += time.Duration(r.Int63n(1000)) * time.Millisecond
 
-			if wait > max {
-				wait = max
+			if wait > maxDuration {
+				wait = maxDuration
 			}
 			s.Sleep(wait)
 		}
@@ -262,5 +238,5 @@ func retry(s sleeper, attempts uint, interval, max time.Duration, do func() erro
 			return nil
 		}
 	}
-	return
+	return err
 }

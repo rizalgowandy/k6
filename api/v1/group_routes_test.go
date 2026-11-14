@@ -1,44 +1,96 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package v1
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.k6.io/k6/core"
-	"go.k6.io/k6/core/local"
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/testutils"
-	"go.k6.io/k6/lib/testutils/minirunner"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/internal/execution"
+	"go.k6.io/k6/v2/internal/execution/local"
+	"go.k6.io/k6/v2/internal/lib/testutils"
+	"go.k6.io/k6/v2/internal/lib/testutils/minirunner"
+	"go.k6.io/k6/v2/internal/metrics/engine"
+	"go.k6.io/k6/v2/internal/usage"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
+func getTestPreInitState(tb testing.TB) *lib.TestPreInitState {
+	reg := metrics.NewRegistry()
+	logger := testutils.NewLogger(tb)
+	return &lib.TestPreInitState{
+		Logger:         logger,
+		RuntimeOptions: lib.RuntimeOptions{},
+		Registry:       reg,
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(reg),
+		Usage:          usage.New(),
+	}
+}
+
+func getTestRunState(tb testing.TB, options lib.Options, runner lib.Runner) *lib.TestRunState {
+	require.NoError(tb, runner.SetOptions(runner.GetOptions().Apply(options)))
+	piState := getTestPreInitState(tb)
+	return &lib.TestRunState{
+		TestPreInitState: piState,
+		Options:          options,
+		Runner:           runner,
+		GroupSummary:     lib.NewGroupSummary(piState.Logger),
+		RunTags:          piState.Registry.RootTagSet().WithTagsFromMap(options.RunTags),
+	}
+}
+
+func getControlSurface(tb testing.TB, testState *lib.TestRunState) *ControlSurface {
+	execScheduler, err := execution.NewScheduler(testState, local.NewController())
+	require.NoError(tb, err)
+
+	me, err := engine.NewMetricsEngine(testState.Registry, testState.Logger)
+	require.NoError(tb, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tb.Cleanup(cancel)
+	ctx, _ = execution.NewTestRunContext(ctx, testState.Logger)
+
+	return &ControlSurface{
+		RunCtx:        ctx,
+		Samples:       make(chan metrics.SampleContainer, 1000),
+		MetricsEngine: me,
+		Scheduler:     execScheduler,
+		RunState:      testState,
+	}
+}
+
 func TestGetGroups(t *testing.T) {
+	t.Parallel()
+
+	cs := getControlSurface(t, getTestRunState(t, lib.Options{}, &minirunner.MiniRunner{}))
+	require.NoError(t, cs.RunState.GroupSummary.Start())
+	cs.RunState.GroupSummary.AddMetricSamples([]metrics.SampleContainer{
+		metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: cs.RunState.BuiltinMetrics.GroupDuration,
+				Tags:   cs.RunState.Registry.RootTagSet().With("group", "::group 1"),
+			},
+		},
+		metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: cs.RunState.BuiltinMetrics.GroupDuration,
+				Tags:   cs.RunState.Registry.RootTagSet().With("group", ""),
+			},
+		},
+		metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: cs.RunState.BuiltinMetrics.GroupDuration,
+				Tags:   cs.RunState.Registry.RootTagSet().With("group", "::group 1::group 2"),
+			},
+		},
+	})
+	require.NoError(t, cs.RunState.GroupSummary.Stop())
+
 	g0, err := lib.NewGroup("", nil)
 	assert.NoError(t, err)
 	g1, err := g0.Group("group 1")
@@ -46,25 +98,22 @@ func TestGetGroups(t *testing.T) {
 	g2, err := g1.Group("group 2")
 	assert.NoError(t, err)
 
-	logger := logrus.New()
-	logger.SetOutput(testutils.NewTestOutput(t))
-
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{Group: g0}, builtinMetrics, logger)
-	require.NoError(t, err)
-	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, registry)
-	require.NoError(t, err)
-
 	t.Run("list", func(t *testing.T) {
+		t.Parallel()
+
 		rw := httptest.NewRecorder()
-		NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/groups", nil))
+		NewHandler(cs).ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/groups", nil))
 		res := rw.Result()
+		t.Cleanup(func() {
+			assert.NoError(t, res.Body.Close())
+		})
 		body := rw.Body.Bytes()
 		assert.Equal(t, http.StatusOK, res.StatusCode)
 		assert.NotEmpty(t, body)
 
 		t.Run("document", func(t *testing.T) {
+			t.Parallel()
+
 			var doc groupsJSONAPI
 			assert.NoError(t, json.Unmarshal(body, &doc))
 			if assert.NotEmpty(t, doc.Data) {
@@ -73,6 +122,8 @@ func TestGetGroups(t *testing.T) {
 		})
 
 		t.Run("groups", func(t *testing.T) {
+			t.Parallel()
+
 			var envelop groupsJSONAPI
 			require.NoError(t, json.Unmarshal(body, &envelop))
 			require.Len(t, envelop.Data, 3)
@@ -105,9 +156,13 @@ func TestGetGroups(t *testing.T) {
 	})
 	for _, gp := range []*lib.Group{g0, g1, g2} {
 		t.Run(gp.Name, func(t *testing.T) {
+			t.Parallel()
 			rw := httptest.NewRecorder()
-			NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/groups/"+gp.ID, nil))
+			NewHandler(cs).ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/groups/"+gp.ID, nil))
 			res := rw.Result()
+			t.Cleanup(func() {
+				assert.NoError(t, res.Body.Close())
+			})
 			assert.Equal(t, http.StatusOK, res.StatusCode)
 		})
 	}

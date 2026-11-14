@@ -1,40 +1,17 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cloudapi
 
 import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
-var (
-	ErrNotAuthorized    = errors.New("Not allowed to upload result to Load Impact cloud")
-	ErrNotAuthenticated = errors.New("Failed to authenticate with Load Impact cloud")
-	ErrUnknown          = errors.New("An error occurred talking to Load Impact cloud")
-)
+var errUnknown = errors.New("an error occurred communicating with k6 Cloud")
 
-// ErrorResponse represents an error cause by talking to the API
-type ErrorResponse struct {
+// ResponseError represents an error cause by talking to the API
+type ResponseError struct {
 	Response *http.Response `json:"-"`
 
 	Code        int                 `json:"code"`
@@ -45,15 +22,10 @@ type ErrorResponse struct {
 }
 
 func contains(s []string, e string) bool {
-	for _, a := range s {
-		if a == e {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s, e)
 }
 
-func (e ErrorResponse) Error() string {
+func (e ResponseError) Error() string {
 	msg := e.Message
 
 	for _, v := range e.Errors {
@@ -86,11 +58,12 @@ func (e ErrorResponse) Error() string {
 	}
 
 	var code string
-	if e.Code > 0 && e.Response != nil {
+	switch {
+	case e.Code > 0 && e.Response != nil:
 		code = fmt.Sprintf("%d/E%d", e.Response.StatusCode, e.Code)
-	} else if e.Response != nil {
+	case e.Response != nil:
 		code = fmt.Sprintf("%d", e.Response.StatusCode)
-	} else if e.Code > 0 {
+	case e.Code > 0:
 		code = fmt.Sprintf("E%d", e.Code)
 	}
 

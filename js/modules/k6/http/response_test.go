@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -29,7 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/v2/lib"
+	"go.k6.io/k6/v2/metrics"
 )
 
 const testGetFormHTML = `
@@ -103,30 +84,81 @@ func myFormHandler(w http.ResponseWriter, r *http.Request) {
 		body = []byte(testGetFormHTML)
 	}
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
-func jsonHandler(w http.ResponseWriter, r *http.Request) {
+func jsonHandler(w http.ResponseWriter, _ *http.Request) {
 	body := []byte(jsonData)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
-func invalidJSONHandler(w http.ResponseWriter, r *http.Request) {
+func invalidJSONHandler(w http.ResponseWriter, _ *http.Request) {
 	body := []byte(invalidJSONData)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
-//nolint:paralleltest
+func TestCheckErrorInJSON_Offsets(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		wantLine int
+		wantChar int
+	}{
+		{
+			name:     "invalid-first-byte",
+			input:    "a\nb",
+			wantLine: 1,
+			wantChar: 1,
+		},
+		{
+			name:     "invalid-after-newline",
+			input:    "true\nx",
+			wantLine: 2,
+			wantChar: 1,
+		},
+		{
+			name: "invalid-middle",
+			input: "{\n" +
+				"  \"a\": 1,\n" +
+				"  \"b\": [1, 2, 3,, 4]\n" +
+				"}",
+			wantLine: 3,
+			wantChar: 17,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var v any
+			err := json.Unmarshal([]byte(testCase.input), &v)
+			require.Error(t, err)
+
+			var syntaxError *json.SyntaxError
+			require.ErrorAs(t, err, &syntaxError)
+
+			jsonErr := checkErrorInJSON([]byte(testCase.input), int(syntaxError.Offset), err)
+
+			var parsed jsonError
+			require.ErrorAs(t, jsonErr, &parsed)
+			assert.Equal(t, testCase.wantLine, parsed.line)
+			assert.Equal(t, testCase.wantChar, parsed.character)
+		})
+	}
+}
+
 func TestResponse(t *testing.T) {
-	tb, state, samples, rt, _ := newRuntime(t)
-	root := state.Group
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 	sr := tb.Replacer.Replace
 
 	tb.Mux.HandleFunc("/myforms/get", myFormHandler)
@@ -140,7 +172,7 @@ func TestResponse(t *testing.T) {
 			if (res.body.indexOf("Herman Melville - Moby-Dick") == -1) { throw new Error("wrong body: " + res.body); }
 		`))
 		assert.NoError(t, err)
-		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), "", 200, "")
+		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), 200, "")
 
 		t.Run("html", func(t *testing.T) {
 			_, err := rt.RunString(`
@@ -164,16 +196,16 @@ func TestResponse(t *testing.T) {
 		})
 
 		t.Run("group", func(t *testing.T) {
-			g, err := root.Group("my group")
-			if assert.NoError(t, err) {
-				old := state.Group
-				state.Group = g
-				state.Tags.Set("group", g.Path)
-				defer func() {
-					state.Group = old
-					state.Tags.Set("group", old.Path)
-				}()
-			}
+			groupName, err := lib.NewGroupPath(lib.RootGroupPath, "my group")
+			require.NoError(t, err)
+			state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
+				tagsAndMeta.SetTag("group", groupName)
+			})
+			defer func() {
+				state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
+					tagsAndMeta.SetTag("group", "")
+				})
+			}()
 
 			_, err = rt.RunString(sr(`
 				var res = http.request("GET", "HTTPBIN_URL/html");
@@ -181,7 +213,7 @@ func TestResponse(t *testing.T) {
 				if (res.body.indexOf("Herman Melville - Moby-Dick") == -1) { throw new Error("wrong body: " + res.body); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), "", 200, "::my group")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), 200, "::my group")
 		})
 
 		t.Run("NoResponseBody", func(t *testing.T) {
@@ -199,18 +231,16 @@ func TestResponse(t *testing.T) {
 			if (res.json().args.b != "2") { throw new Error("wrong ?b: " + res.json().args.b); }
 		`))
 		assert.NoError(t, err)
-		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get?a=1&b=2"), "", 200, "")
+		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get?a=1&b=2"), 200, "")
 
 		t.Run("Invalid", func(t *testing.T) {
 			_, err := rt.RunString(sr(`http.request("GET", "HTTPBIN_URL/html").json();`))
-			//nolint:lll
-			assert.Contains(t, err.Error(), "cannot parse json due to an error at line 1, character 2 , error: invalid character '<' looking for beginning of value")
+			assert.Contains(t, err.Error(), "cannot parse json due to an error at line 1, character 1 , error: invalid character '<' looking for beginning of value")
 		})
 
 		t.Run("Invalid", func(t *testing.T) {
 			_, err := rt.RunString(sr(`http.request("GET", "HTTPBIN_URL/invalidjson").json();`))
-			//nolint:lll
-			assert.Contains(t, err.Error(), "cannot parse json due to an error at line 3, character 9 , error: invalid character 'e' in literal true (expecting 'r')")
+			assert.Contains(t, err.Error(), "cannot parse json due to an error at line 3, character 7 , error: invalid character 'e' in literal true (expecting 'r')")
 		})
 
 		t.Run("NoResponseBody", func(t *testing.T) {
@@ -260,7 +290,7 @@ func TestResponse(t *testing.T) {
 				{ throw new Error("Expected 'Dale', but got: " + value); }
 		`))
 		assert.NoError(t, err)
-		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/json"), "", 200, "")
+		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/json"), 200, "")
 	})
 
 	t.Run("SubmitForm", func(t *testing.T) {
@@ -280,7 +310,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withFields", func(t *testing.T) {
@@ -299,7 +329,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withRequestParams", func(t *testing.T) {
@@ -312,7 +342,7 @@ func TestResponse(t *testing.T) {
 				if (headers["My-Fancy-Header"][0] !== "SomeValue" ) { throw new Error("incorrect headers: " + JSON.stringify(headers)); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withFormSelector", func(t *testing.T) {
@@ -331,7 +361,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withNonExistentForm", func(t *testing.T) {
@@ -359,7 +389,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			require.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/myforms/get"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/myforms/get"), 200, "")
 		})
 	})
 
@@ -372,7 +402,7 @@ func TestResponse(t *testing.T) {
 				if (res.status != 200) { throw new Error("wrong status: " + res.status); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/1"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/1"), 200, "")
 		})
 
 		t.Run("withSelector", func(t *testing.T) {
@@ -383,7 +413,7 @@ func TestResponse(t *testing.T) {
 				if (res.status != 200) { throw new Error("wrong status: " + res.status); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/4"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/4"), 200, "")
 		})
 
 		t.Run("withNonExistentLink", func(t *testing.T) {
@@ -406,7 +436,18 @@ func TestResponse(t *testing.T) {
 				if (headers["My-Fancy-Header"][0] !== "SomeValue" ) { throw new Error("incorrect headers: " + JSON.stringify(headers)); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get"), 200, "")
 		})
+	})
+
+	t.Run("FailedRequestHeadersAndCookiesAssignment", func(t *testing.T) {
+		_, err := rt.RunString(`
+			var res = http.get("https://test.k6.i", { throw: false });
+			res.headers["custom-key"] = "custom-value";
+			if (res.headers["custom-key"] !== "custom-value") {
+				throw new Error("Failed to assign to headers on failed request");
+			}
+		`)
+		assert.NoError(t, err)
 	})
 }

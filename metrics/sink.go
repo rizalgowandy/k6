@@ -1,27 +1,7 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
-	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -30,23 +10,46 @@ import (
 var (
 	_ Sink = &CounterSink{}
 	_ Sink = &GaugeSink{}
-	_ Sink = &TrendSink{}
+	_ Sink = NewTrendSink()
 	_ Sink = &RateSink{}
-	_ Sink = &DummySink{}
 )
 
+// Sink is a sample sink which will accumulate data in specific way
 type Sink interface {
 	Add(s Sample)                              // Add a sample to the sink.
-	Calc()                                     // Make final calculations.
 	Format(t time.Duration) map[string]float64 // Data for thresholds.
 	IsEmpty() bool                             // Check if the Sink is empty.
 }
 
+// NewSink creates the related Sink for
+// the provided MetricType.
+func NewSink(mt MetricType) Sink {
+	var sink Sink
+	switch mt {
+	case Counter:
+		sink = &CounterSink{}
+	case Gauge:
+		sink = &GaugeSink{}
+	case Trend:
+		sink = NewTrendSink()
+	case Rate:
+		sink = &RateSink{}
+	default:
+		// Should not be possible to create
+		// an invalid metric type except for specific
+		// and controlled tests
+		panic(fmt.Sprintf("MetricType %q is not supported", mt))
+	}
+	return sink
+}
+
+// CounterSink is a sink that represents a Counter
 type CounterSink struct {
 	Value float64
 	First time.Time
 }
 
+// Add a single sample to the sink
 func (c *CounterSink) Add(s Sample) {
 	c.Value += s.Value
 	if c.First.IsZero() {
@@ -57,15 +60,24 @@ func (c *CounterSink) Add(s Sample) {
 // IsEmpty indicates whether the CounterSink is empty.
 func (c *CounterSink) IsEmpty() bool { return c.First.IsZero() }
 
-func (c *CounterSink) Calc() {}
-
+// Format counter and return a map
 func (c *CounterSink) Format(t time.Duration) map[string]float64 {
 	return map[string]float64{
 		"count": c.Value,
-		"rate":  c.Value / (float64(t) / float64(time.Second)),
+		"rate":  c.Rate(t),
 	}
 }
 
+// Rate calculates the rate (per second) of the counter,
+// based on the given duration.
+func (c *CounterSink) Rate(t time.Duration) float64 {
+	if t == 0 {
+		return 0
+	}
+	return c.Value / (float64(t) / float64(time.Second))
+}
+
+// GaugeSink is a sink represents a Gauge
 type GaugeSink struct {
 	Value    float64
 	Max, Min float64
@@ -75,9 +87,10 @@ type GaugeSink struct {
 // IsEmpty indicates whether the GaugeSink is empty.
 func (g *GaugeSink) IsEmpty() bool { return !g.minSet }
 
+// Add a single sample to the sink
 func (g *GaugeSink) Add(s Sample) {
 	g.Value = s.Value
-	if s.Value > g.Max {
+	if s.Value > g.Max || !g.minSet {
 		g.Max = s.Value
 	}
 	if s.Value < g.Min || !g.minSet {
@@ -86,89 +99,114 @@ func (g *GaugeSink) Add(s Sample) {
 	}
 }
 
-func (g *GaugeSink) Calc() {}
-
-func (g *GaugeSink) Format(t time.Duration) map[string]float64 {
+// Format gauge and return a map
+func (g *GaugeSink) Format(_ time.Duration) map[string]float64 {
 	return map[string]float64{"value": g.Value}
 }
 
-type TrendSink struct {
-	Values  []float64
-	jumbled bool
+// NewTrendSink makes a Trend sink with the OpenHistogram circllhist histogram.
+func NewTrendSink() *TrendSink {
+	return &TrendSink{}
+}
 
-	Count    uint64
-	Min, Max float64
-	Sum, Avg float64
-	Med      float64
+// TrendSink is a sink for a Trend
+type TrendSink struct {
+	values []float64
+	sorted bool
+
+	count    uint64
+	min, max float64
+	sum      float64
 }
 
 // IsEmpty indicates whether the TrendSink is empty.
-func (t *TrendSink) IsEmpty() bool { return t.Count == 0 }
+func (t *TrendSink) IsEmpty() bool { return t.count == 0 }
 
+// Add a single sample into the trend
 func (t *TrendSink) Add(s Sample) {
-	t.Values = append(t.Values, s.Value)
-	t.jumbled = true
-	t.Count += 1
-	t.Sum += s.Value
-	t.Avg = t.Sum / float64(t.Count)
+	if t.count == 0 {
+		t.max, t.min = s.Value, s.Value
+	} else {
+		if s.Value > t.max {
+			t.max = s.Value
+		}
+		if s.Value < t.min {
+			t.min = s.Value
+		}
+	}
 
-	if s.Value > t.Max {
-		t.Max = s.Value
-	}
-	if s.Value < t.Min || t.Count == 1 {
-		t.Min = s.Value
-	}
+	t.values = append(t.values, s.Value)
+	t.sorted = false
+	t.count++
+	t.sum += s.Value
 }
 
 // P calculates the given percentile from sink values.
 func (t *TrendSink) P(pct float64) float64 {
-	switch t.Count {
+	switch t.count {
 	case 0:
 		return 0
 	case 1:
-		return t.Values[0]
+		return t.values[0]
 	default:
+		if !t.sorted {
+			sort.Float64s(t.values)
+			t.sorted = true
+		}
+
 		// If percentile falls on a value in Values slice, we return that value.
 		// If percentile does not fall on a value in Values slice, we calculate (linear interpolation)
 		// the value that would fall at percentile, given the values above and below that percentile.
-		t.Calc()
-		i := pct * (float64(t.Count) - 1.0)
-		j := t.Values[int(math.Floor(i))]
-		k := t.Values[int(math.Ceil(i))]
+		i := pct * (float64(t.count) - 1.0)
+		j := t.values[int(math.Floor(i))]
+		k := t.values[int(math.Ceil(i))]
 		f := i - math.Floor(i)
 		return j + (k-j)*f
 	}
 }
 
-func (t *TrendSink) Calc() {
-	if !t.jumbled {
-		return
-	}
-
-	sort.Float64s(t.Values)
-	t.jumbled = false
-
-	// The median of an even number of values is the average of the middle two.
-	if (t.Count & 0x01) == 0 {
-		t.Med = (t.Values[(t.Count/2)-1] + t.Values[(t.Count/2)]) / 2
-	} else {
-		t.Med = t.Values[t.Count/2]
-	}
+// Min returns the minimum value.
+func (t *TrendSink) Min() float64 {
+	return t.min
 }
 
-func (t *TrendSink) Format(tt time.Duration) map[string]float64 {
-	t.Calc()
+// Max returns the maximum value.
+func (t *TrendSink) Max() float64 {
+	return t.max
+}
+
+// Count returns the number of recorded values.
+func (t *TrendSink) Count() uint64 {
+	return t.count
+}
+
+// Avg returns the average (i.e. mean) value.
+func (t *TrendSink) Avg() float64 {
+	if t.count > 0 {
+		return t.sum / float64(t.count)
+	}
+	return 0
+}
+
+// Total returns the total (i.e. "sum") value for all measurements.
+func (t *TrendSink) Total() float64 {
+	return t.sum
+}
+
+// Format trend and return a map
+func (t *TrendSink) Format(_ time.Duration) map[string]float64 {
 	// TODO: respect the summaryTrendStats for REST API
 	return map[string]float64{
-		"min":   t.Min,
-		"max":   t.Max,
-		"avg":   t.Avg,
-		"med":   t.Med,
+		"min":   t.Min(),
+		"max":   t.Max(),
+		"avg":   t.Avg(),
+		"med":   t.P(0.5),
 		"p(90)": t.P(0.90),
 		"p(95)": t.P(0.95),
 	}
 }
 
+// RateSink is a sink for a rate
 type RateSink struct {
 	Trues int64
 	Total int64
@@ -177,35 +215,20 @@ type RateSink struct {
 // IsEmpty indicates whether the RateSink is empty.
 func (r *RateSink) IsEmpty() bool { return r.Total == 0 }
 
+// Add a single sample to the rate
 func (r *RateSink) Add(s Sample) {
-	r.Total += 1
+	r.Total++
 	if s.Value != 0 {
-		r.Trues += 1
+		r.Trues++
 	}
 }
 
-func (r RateSink) Calc() {}
-
-func (r RateSink) Format(t time.Duration) map[string]float64 {
+// Format rate and return a map
+func (r RateSink) Format(_ time.Duration) map[string]float64 {
 	var rate float64
 	if r.Total > 0 {
 		rate = float64(r.Trues) / float64(r.Total)
 	}
 
 	return map[string]float64{"rate": rate}
-}
-
-type DummySink map[string]float64
-
-// IsEmpty indicates whether the DummySink is empty.
-func (d DummySink) IsEmpty() bool { return len(d) == 0 }
-
-func (d DummySink) Add(s Sample) {
-	panic(errors.New("you can't add samples to a dummy sink"))
-}
-
-func (d DummySink) Calc() {}
-
-func (d DummySink) Format(t time.Duration) map[string]float64 {
-	return map[string]float64(d)
 }

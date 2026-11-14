@@ -1,45 +1,26 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 
-	"go.k6.io/k6/lib"
+	"go.k6.io/k6/v2/lib"
 )
 
 // CompressionType is used to specify what compression is to be used to compress the body of a
 // request
 // The conversion and validation methods are auto-generated with https://github.com/alvaroloes/enumer:
-//nolint: lll
+//
 //go:generate enumer -type=CompressionType -transform=snake -trimprefix CompressionType -output compression_type_gen.go
 type CompressionType uint
 
@@ -125,7 +106,7 @@ func wrapDecompressionError(err error) error {
 	// we don't use it... maybe the code that builds the decompression readers
 	// could also add an appropriate error-wrapper layer?
 	for _, decErr := range &decompressionErrors {
-		if err == decErr {
+		if errors.Is(err, decErr) {
 			return newDecompressionError(err)
 		}
 	}
@@ -140,60 +121,49 @@ func readResponseBody(
 	respType ResponseType,
 	resp *http.Response,
 	respErr error,
-) (interface{}, error) {
+) (any, error) {
 	if resp == nil || respErr != nil {
 		return nil, respErr
 	}
 
 	if respType == ResponseTypeNone {
-		_, err := io.Copy(ioutil.Discard, resp.Body)
+		_, err := io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		if err != nil {
-			respErr = err
-		}
-		return nil, respErr
+
+		return nil, err
 	}
 
 	rc := &readCloser{resp.Body}
 	// Ensure that the entire response body is read and closed, e.g. in case of decoding errors
 	defer func(respBody io.ReadCloser) {
-		_, _ = io.Copy(ioutil.Discard, respBody)
+		_, _ = io.Copy(io.Discard, respBody)
 		_ = respBody.Close()
 	}(resp.Body)
 
+	if (resp.StatusCode >= 100 && resp.StatusCode <= 199) || // 1xx
+		resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+		// for all three of this status code there is always no content
+		// https://www.rfc-editor.org/rfc/rfc9110.html#section-6.4.1-8
+		// this also prevents trying to read
+		return nil, nil //nolint:nilnil
+	}
 	contentEncodings := strings.Split(resp.Header.Get("Content-Encoding"), ",")
 	// Transparently decompress the body if it's has a content-encoding we
 	// support. If not, simply return it as it is.
-	for i := len(contentEncodings) - 1; i >= 0; i-- {
-		contentEncoding := strings.TrimSpace(contentEncodings[i])
+	for _, contentEncoding := range slices.Backward(contentEncodings) {
+		contentEncoding := strings.TrimSpace(contentEncoding)
 		if compression, err := CompressionTypeString(contentEncoding); err == nil {
-			var decoder io.Reader
-			var err error
-			switch compression {
-			case CompressionTypeDeflate:
-				decoder, err = zlib.NewReader(rc)
-			case CompressionTypeGzip:
-				decoder, err = gzip.NewReader(rc)
-			case CompressionTypeZstd:
-				decoder, err = zstd.NewReader(rc)
-			case CompressionTypeBr:
-				decoder = brotli.NewReader(rc)
-			default:
-				// We have not implemented a compression ... :(
-				err = fmt.Errorf(
-					"unsupported compression type %s - this is a bug in k6, please report it",
-					compression,
-				)
-			}
+			decoder, err := pickDecoder(compression, rc)
 			if err != nil {
 				return nil, newDecompressionError(err)
 			}
+
 			rc = &readCloser{decoder}
 		}
 	}
-	buf := state.BPool.Get()
-	defer state.BPool.Put(buf)
-	buf.Reset()
+
+	buf := state.BufferPool.Get()
+	defer state.BufferPool.Put(buf)
 	_, err := io.Copy(buf, rc.Reader)
 	if err != nil {
 		respErr = wrapDecompressionError(err)
@@ -204,7 +174,7 @@ func readResponseBody(
 		respErr = wrapDecompressionError(err)
 	}
 
-	var result interface{}
+	var result any
 	// Binary or string
 	switch respType {
 	case ResponseTypeText:
@@ -213,7 +183,7 @@ func readResponseBody(
 		// Copy the data to a new slice before we return the buffer to the pool,
 		// because buf.Bytes() points to the underlying buffer byte slice.
 		// The ArrayBuffer wrapping will be done in the js/modules/k6/http
-		// package to avoid a reverse dependency, since it depends on goja.
+		// package to avoid a reverse dependency, since it depends on Sobek.
 		binData := make([]byte, buf.Len())
 		copy(binData, buf.Bytes())
 		result = binData
@@ -222,4 +192,27 @@ func readResponseBody(
 	}
 
 	return result, respErr
+}
+
+func pickDecoder(compression CompressionType, rc *readCloser) (io.Reader, error) {
+	var decoder io.Reader
+	var err error
+	switch compression {
+	case CompressionTypeDeflate:
+		decoder, err = zlib.NewReader(rc)
+	case CompressionTypeGzip:
+		decoder, err = gzip.NewReader(rc)
+	case CompressionTypeZstd:
+		decoder, err = zstd.NewReader(rc)
+	case CompressionTypeBr:
+		decoder = brotli.NewReader(rc)
+	default:
+		// We have not implemented a compression ... :(
+		err = fmt.Errorf(
+			"unsupported compression type %s - this is a bug in k6, please report it",
+			compression,
+		)
+	}
+
+	return decoder, err
 }

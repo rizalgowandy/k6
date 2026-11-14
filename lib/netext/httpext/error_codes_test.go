@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -25,7 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,10 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/netext"
-	"go.k6.io/k6/lib/testutils/httpmultibin"
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/internal/lib/testutils/httpmultibin"
+	"go.k6.io/k6/v2/lib/netext"
+	"go.k6.io/k6/v2/lib/types"
 )
 
 func TestDefaultError(t *testing.T) {
@@ -79,7 +58,7 @@ func TestBlackListedIPError(t *testing.T) {
 type timeoutError bool
 
 func (t timeoutError) Timeout() bool {
-	return (bool)(t)
+	return bool(t)
 }
 
 func (t timeoutError) Error() string {
@@ -147,7 +126,7 @@ func testMapOfErrorCodes(t *testing.T, testTable map[errCode]error) {
 func TestConnReset(t *testing.T) {
 	t.Parallel()
 	// based on https://gist.github.com/jpittis/4357d817dc425ae99fbf719828ab1800
-	ln, err := net.Listen("tcp", "localhost:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,11 +180,15 @@ func TestHTTP2StreamError(t *testing.T) {
 	t.Parallel()
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
-	tb.Mux.HandleFunc("/tsr", func(rw http.ResponseWriter, req *http.Request) {
+	tb.Mux.HandleFunc("/tsr", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Header().Set("Content-Length", "100000")
-		rw.WriteHeader(200)
+		rw.WriteHeader(http.StatusOK)
 
-		rw.(http.Flusher).Flush()
+		f, ok := rw.(http.Flusher)
+		if !ok {
+			panic("expected http.ResponseWriter to be http.Flusher")
+		}
+		f.Flush()
 		time.Sleep(time.Millisecond * 2)
 		panic("expected internal error")
 	})
@@ -217,7 +200,7 @@ func TestHTTP2StreamError(t *testing.T) {
 	res, err := client.Get(tb.Replacer.Replace("HTTP2BIN_URL/tsr")) //nolint:noctx
 	require.NotNil(t, res)
 	require.NoError(t, err)
-	_, err = ioutil.ReadAll(res.Body)
+	_, err = io.ReadAll(res.Body)
 	_ = res.Body.Close()
 	require.Error(t, err)
 
@@ -236,9 +219,14 @@ func TestX509HostnameError(t *testing.T) {
 	}
 	var err error
 	badHostname := "somewhere.else"
-	tb.Dialer.Hosts[badHostname], err = lib.NewHostAddress(net.ParseIP(tb.Replacer.Replace("HTTPSBIN_IP")), "")
+	badHost, err := types.NewHost(net.ParseIP(tb.Replacer.Replace("HTTPSBIN_IP")), "")
 	require.NoError(t, err)
-	req, err := http.NewRequestWithContext(context.Background(), "GET", tb.Replacer.Replace("https://"+badHostname+":HTTPSBIN_PORT/get"), nil)
+
+	tb.Dialer.Hosts, err = types.NewHosts(map[string]types.Host{
+		badHostname: *badHost,
+	})
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, tb.Replacer.Replace("https://"+badHostname+":HTTPSBIN_PORT/get"), nil)
 	require.NoError(t, err)
 	res, err := client.Do(req) //nolint:bodyclose
 	require.Nil(t, res)
@@ -259,7 +247,7 @@ func TestX509UnknownAuthorityError(t *testing.T) {
 			DialContext: tb.HTTPTransport.DialContext,
 		},
 	}
-	req, err := http.NewRequestWithContext(context.Background(), "GET", tb.Replacer.Replace("HTTPSBIN_URL/get"), nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, tb.Replacer.Replace("HTTPSBIN_URL/get"), nil)
 	require.NoError(t, err)
 	res, err := client.Do(req) //nolint:bodyclose
 	require.Nil(t, res)
@@ -273,10 +261,10 @@ func TestX509UnknownAuthorityError(t *testing.T) {
 func TestDefaultTLSError(t *testing.T) {
 	t.Parallel()
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	go func() {
-		conn, err := l.Accept() //nolint:govet // the shadowing is intentional
+		conn, err := l.Accept()
 		require.NoError(t, err)
 		_, err = conn.Write([]byte("not tls header")) // we just want to get an error
 		require.NoError(t, err)
@@ -288,7 +276,7 @@ func TestDefaultTLSError(t *testing.T) {
 		Timeout: time.Second * 3,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec
+				InsecureSkipVerify: true,
 			},
 		},
 	}
@@ -308,8 +296,8 @@ func TestHTTP2ConnectionError(t *testing.T) {
 	tb := getHTTP2ServerWithCustomConnContext(t)
 
 	// Pre-configure the HTTP client transport with the dialer and TLS config (incl. HTTP2 support)
-	tb.Mux.HandleFunc("/tsr", func(rw http.ResponseWriter, req *http.Request) {
-		conn := req.Context().Value(connKey).(*tls.Conn) //nolint:forcetypeassert
+	tb.Mux.HandleFunc("/tsr", func(_ http.ResponseWriter, req *http.Request) {
+		conn := req.Context().Value(connKey).(*tls.Conn)
 		f := http2.NewFramer(conn, conn)
 		require.NoError(t, f.WriteData(3213, false, []byte("something")))
 	})
@@ -327,9 +315,12 @@ func TestHTTP2ConnectionError(t *testing.T) {
 func TestHTTP2GoAwayError(t *testing.T) {
 	t.Parallel()
 
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipped due to https://github.com/grafana/k6/issues/4098")
+	}
 	tb := getHTTP2ServerWithCustomConnContext(t)
-	tb.Mux.HandleFunc("/tsr", func(rw http.ResponseWriter, req *http.Request) {
-		conn := req.Context().Value(connKey).(*tls.Conn) //nolint:forcetypeassert
+	tb.Mux.HandleFunc("/tsr", func(_ http.ResponseWriter, req *http.Request) {
+		conn := req.Context().Value(connKey).(*tls.Conn)
 		f := http2.NewFramer(conn, conn)
 		require.NoError(t, f.WriteGoAway(4, http2.ErrCodeInadequateSecurity, []byte("whatever")))
 		require.NoError(t, conn.CloseWrite())
@@ -345,6 +336,99 @@ func TestHTTP2GoAwayError(t *testing.T) {
 	code, msg := errorCodeForError(err)
 	assert.Equal(t, unknownHTTP2GoAwayErrorCode+errCode(http2.ErrCodeInadequateSecurity)+1, code)
 	assert.Equal(t, fmt.Sprintf(http2GoAwayErrorCodeMsg, http2.ErrCodeInadequateSecurity), msg)
+}
+
+// TestHTTP2MessageFallback covers message-based classification of HTTP/2 errors.
+// Both golang.org/x/net/http2 and Go's stdlib net/http/internal/http2 produce
+// identical Error() strings, so a single message-based path handles every Go
+// version uniformly. This feeds exact error strings directly, so it runs on
+// every Go version without a live server.
+func TestHTTP2MessageFallback(t *testing.T) {
+	t.Parallel()
+
+	streamErr := fmt.Errorf("stream error: stream ID 1; %v; EOF", http2.ErrCodeInternal)
+	streamErrNoCause := fmt.Errorf("stream error: stream ID 1; %v", http2.ErrCodeInternal)
+	connErr := errors.New("connection error: " + http2.ErrCodeProtocol.String())
+	goAwayErr := fmt.Errorf(
+		"http2: server sent GOAWAY and closed the connection; LastStreamID=4, ErrCode=%v, debug=%q",
+		http2.ErrCodeInadequateSecurity, "whatever")
+
+	testCases := []struct {
+		name     string
+		err      error
+		wantCode errCode
+		wantMsg  string
+	}{
+		{
+			name:     "stream error",
+			err:      streamErr,
+			wantCode: unknownHTTP2StreamErrorCode + http2ErrCodeOffset(http2.ErrCodeInternal),
+			wantMsg:  fmt.Sprintf(http2StreamErrorCodeMsg, http2.ErrCodeInternal),
+		},
+		{
+			name:     "stream error wrapped",
+			err:      fmt.Errorf("read: %w", streamErr),
+			wantCode: unknownHTTP2StreamErrorCode + http2ErrCodeOffset(http2.ErrCodeInternal),
+			wantMsg:  fmt.Sprintf(http2StreamErrorCodeMsg, http2.ErrCodeInternal),
+		},
+		{
+			name:     "stream error no cause",
+			err:      streamErrNoCause,
+			wantCode: unknownHTTP2StreamErrorCode + http2ErrCodeOffset(http2.ErrCodeInternal),
+			wantMsg:  fmt.Sprintf(http2StreamErrorCodeMsg, http2.ErrCodeInternal),
+		},
+		{
+			name:     "connection error",
+			err:      connErr,
+			wantCode: unknownHTTP2ConnectionErrorCode + http2ErrCodeOffset(http2.ErrCodeProtocol),
+			wantMsg:  fmt.Sprintf(http2ConnectionErrorCodeMsg, http2.ErrCodeProtocol),
+		},
+		{
+			name:     "connection error wrapped in url.Error",
+			err:      &url.Error{Op: "Get", URL: "https://example.com", Err: connErr},
+			wantCode: unknownHTTP2ConnectionErrorCode + http2ErrCodeOffset(http2.ErrCodeProtocol),
+			wantMsg:  fmt.Sprintf(http2ConnectionErrorCodeMsg, http2.ErrCodeProtocol),
+		},
+		{
+			name:     "goaway error",
+			err:      goAwayErr,
+			wantCode: unknownHTTP2GoAwayErrorCode + http2ErrCodeOffset(http2.ErrCodeInadequateSecurity),
+			wantMsg:  fmt.Sprintf(http2GoAwayErrorCodeMsg, http2.ErrCodeInadequateSecurity),
+		},
+		{
+			name:     "goaway error wrapped",
+			err:      fmt.Errorf("read tcp: %w", goAwayErr),
+			wantCode: unknownHTTP2GoAwayErrorCode + http2ErrCodeOffset(http2.ErrCodeInadequateSecurity),
+			wantMsg:  fmt.Sprintf(http2GoAwayErrorCodeMsg, http2.ErrCodeInadequateSecurity),
+		},
+		{
+			name:     "unknown connection error",
+			err:      errors.New("connection error: unknown error code 0xe"),
+			wantCode: unknownHTTP2ConnectionErrorCode,
+			wantMsg:  "http2: connection error with http2 ErrCode unknown error code 0xe",
+		},
+		{
+			name:     "unknown stream error",
+			err:      errors.New("stream error: stream ID 1; unknown error code 0xe; received from peer"),
+			wantCode: unknownHTTP2StreamErrorCode,
+			wantMsg:  "http2: stream error with http2 ErrCode unknown error code 0xe",
+		},
+		{
+			name: "unknown goaway error",
+			err: errors.New(
+				"http2: server sent GOAWAY and closed the connection; LastStreamID=4, ErrCode=unknown error code 0xe, debug=\"whatever\""),
+			wantCode: unknownHTTP2GoAwayErrorCode,
+			wantMsg:  "http2: received GoAway with http2 ErrCode unknown error code 0xe",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, msg := errorCodeForError(tc.err)
+			assert.Equal(t, tc.wantCode, code)
+			assert.Equal(t, tc.wantMsg, msg)
+		})
+	}
 }
 
 type connKeyT int32
@@ -367,31 +451,31 @@ func getHTTP2ServerWithCustomConnContext(t *testing.T) *httpmultibin.HTTPMultiBi
 	require.NoError(t, err)
 	http2IP := net.ParseIP(http2URL.Hostname())
 	require.NotNil(t, http2IP)
-	http2DomainValue, err := lib.NewHostAddress(http2IP, "")
+	http2DomainValue, err := types.NewHost(http2IP, "")
 	require.NoError(t, err)
 
 	// Set up the dialer with shorter timeouts and the custom domains
 	dialer := netext.NewDialer(net.Dialer{
 		Timeout:   2 * time.Second,
 		KeepAlive: 10 * time.Second,
-		DualStack: true,
 	}, netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4))
-	dialer.Hosts = map[string]*lib.HostAddress{
-		http2Domain: http2DomainValue,
-	}
+	dialer.Hosts, err = types.NewHosts(map[string]types.Host{
+		http2Domain: *http2DomainValue,
+	})
+	require.NoError(t, err)
 
 	transport := &http.Transport{
-		DialContext:     dialer.DialContext,
-		TLSClientConfig: tlsConfig,
+		DialContext:       dialer.DialContext,
+		TLSClientConfig:   tlsConfig,
+		ForceAttemptHTTP2: true,
 	}
-	require.NoError(t, http2.ConfigureTransport(transport))
 	return &httpmultibin.HTTPMultiBin{
 		Mux:         mux,
 		ServerHTTP2: http2Srv,
 		Replacer: strings.NewReplacer(
 			"HTTP2BIN_IP_URL", http2Srv.URL,
 			"HTTP2BIN_DOMAIN", http2Domain,
-			"HTTP2BIN_URL", fmt.Sprintf("https://%s:%s", http2Domain, http2URL.Port()),
+			"HTTP2BIN_URL", fmt.Sprintf("https://%s", net.JoinHostPort(http2Domain, http2URL.Port())),
 			"HTTP2BIN_IP", http2IP.String(),
 			"HTTP2BIN_PORT", http2URL.Port(),
 		),

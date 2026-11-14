@@ -1,30 +1,10 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cloudapi
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -34,17 +14,17 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/mailru/easyjson"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/lib/testutils"
-	"go.k6.io/k6/lib/testutils/httpmultibin"
+	"go.k6.io/k6/v2/internal/lib/testutils"
+	"go.k6.io/k6/v2/internal/lib/testutils/httpmultibin"
 )
 
 func TestMsgParsing(t *testing.T) {
+	t.Parallel()
 	m := `{
   "streams": [
     {
@@ -86,11 +66,12 @@ func TestMsgParsing(t *testing.T) {
 		},
 	}
 	var message msg
-	require.NoError(t, easyjson.Unmarshal([]byte(m), &message))
+	require.NoError(t, json.Unmarshal([]byte(m), &message))
 	require.Equal(t, expectMsg, message)
 }
 
 func TestMSGLog(t *testing.T) {
+	t.Parallel()
 	expectMsg := msg{
 		Streams: []msgStreams{
 			{
@@ -111,8 +92,8 @@ func TestMSGLog(t *testing.T) {
 	}
 
 	logger := logrus.New()
-	logger.Out = ioutil.Discard
-	hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+	logger.Out = io.Discard
+	hook := testutils.NewLogHook()
 	logger.AddHook(hook)
 	expectMsg.Log(logger)
 	logLines := hook.Drain()
@@ -169,6 +150,7 @@ func TestRetry(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				var sleepRequests []time.Duration
 				// sleepCollector tracks the request duration value for sleep requests.
 				sleepCollector := sleeperFunc(func(d time.Duration) {
@@ -232,6 +214,7 @@ func TestStreamLogsToLogger(t *testing.T) {
 		wsurl := strings.TrimPrefix(tb.ServerHTTP.URL, "http://")
 		return Config{
 			LogsTailURL: null.NewString(fmt.Sprintf("ws://%s/api/v1/tail", wsurl), false),
+			Token:       null.NewString("fake-token", true),
 		}
 	}
 
@@ -240,7 +223,7 @@ func TestStreamLogsToLogger(t *testing.T) {
 		for _, e := range hook.Drain() {
 			lines = append(lines, e.Message)
 		}
-		return
+		return lines
 	}
 
 	generateLogline := func(key string, ts uint64, msg string) string {
@@ -254,7 +237,10 @@ func TestStreamLogsToLogger(t *testing.T) {
 		defer cancel()
 
 		tb := httpmultibin.NewHTTPMultiBin(t)
-		logtailHandleFunc(tb, func(conn *websocket.Conn, _ *http.Request) {
+		logtailHandleFunc(tb, func(conn *websocket.Conn, req *http.Request) {
+			assert.Equal(t, "token fake-token", req.Header.Get("Authorization"))
+			assert.Equal(t, "ref_id", req.Header.Get("X-K6testrun-Id"))
+
 			rawmsg := json.RawMessage(generateLogline("stream1", 1598282752000000000, "logline1"))
 			err := conn.WriteJSON(rawmsg)
 			require.NoError(t, err)
@@ -264,13 +250,13 @@ func TestStreamLogsToLogger(t *testing.T) {
 			require.NoError(t, err)
 
 			// wait the flush on the network
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			cancel()
 		})
 
 		logger := logrus.New()
-		logger.Out = ioutil.Discard
-		hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+		logger.Out = io.Discard
+		hook := testutils.NewLogHook()
 		logger.AddHook(hook)
 
 		c := configFromHTTPMultiBin(tb)
@@ -293,14 +279,14 @@ func TestStreamLogsToLogger(t *testing.T) {
 			}
 
 			start = time.Unix(0, rawstart)
-			return
+			return start, err
 		}
 
-		var requestsCount uint64
+		var requestsCount atomic.Uint64
 
 		tb := httpmultibin.NewHTTPMultiBin(t)
 		logtailHandleFunc(tb, func(conn *websocket.Conn, req *http.Request) {
-			requests := atomic.AddUint64(&requestsCount, 1)
+			requests := requestsCount.Add(1)
 
 			start, err := startFilter(*req.URL)
 			require.NoError(t, err)
@@ -341,8 +327,8 @@ func TestStreamLogsToLogger(t *testing.T) {
 		})
 
 		logger := logrus.New()
-		logger.Out = ioutil.Discard
-		hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+		logger.Out = io.Discard
+		hook := testutils.NewLogHook()
 		logger.AddHook(hook)
 
 		c := configFromHTTPMultiBin(tb)
@@ -372,15 +358,15 @@ func TestStreamLogsToLogger(t *testing.T) {
 			}
 
 			start = time.Unix(0, rawstart)
-			return
+			return start, err
 		}
 
-		var requestsCount uint64
+		var requestsCount atomic.Uint64
 		t0 := time.Now()
 
 		tb := httpmultibin.NewHTTPMultiBin(t)
 		logtailHandleFunc(tb, func(conn *websocket.Conn, req *http.Request) {
-			requests := atomic.AddUint64(&requestsCount, 1)
+			requests := requestsCount.Add(1)
 
 			start, err := startFilter(*req.URL)
 			require.NoError(t, err)
@@ -409,8 +395,8 @@ func TestStreamLogsToLogger(t *testing.T) {
 		})
 
 		logger := logrus.New()
-		logger.Out = ioutil.Discard
-		hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+		logger.Out = io.Discard
+		hook := testutils.NewLogHook()
 		logger.AddHook(hook)
 
 		c := configFromHTTPMultiBin(tb)

@@ -1,31 +1,12 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
 	"errors"
 	"fmt"
+	"slices"
 
-	"github.com/dop251/goja"
-	"go.k6.io/k6/js/common"
+	"github.com/grafana/sobek"
+	"go.k6.io/k6/v2/js/common"
 )
 
 //nolint:gochecknoglobals
@@ -42,10 +23,8 @@ type expectedStatuses struct {
 }
 
 func (e expectedStatuses) match(status int) bool {
-	for _, v := range e.exact {
-		if v == status {
-			return true
-		}
+	if slices.Contains(e.exact, status) {
+		return true
 	}
 
 	for _, v := range e.minmax {
@@ -59,7 +38,7 @@ func (e expectedStatuses) match(status int) bool {
 // expectedStatuses returns expectedStatuses object based on the provided arguments.
 // The arguments must be either integers or object of `{min: <integer>, max: <integer>}`
 // kind. The "integer"ness is checked by the Number.isInteger.
-func (mi *ModuleInstance) expectedStatuses(args ...goja.Value) *expectedStatuses {
+func (mi *ModuleInstance) expectedStatuses(args ...sobek.Value) *expectedStatuses {
 	rt := mi.vu.Runtime()
 
 	if len(args) == 0 {
@@ -67,9 +46,9 @@ func (mi *ModuleInstance) expectedStatuses(args ...goja.Value) *expectedStatuses
 	}
 	var result expectedStatuses
 
-	jsIsInt, _ := goja.AssertFunction(rt.GlobalObject().Get("Number").ToObject(rt).Get("isInteger"))
-	isInt := func(a goja.Value) bool {
-		v, err := jsIsInt(goja.Undefined(), a)
+	jsIsInt, _ := sobek.AssertFunction(rt.GlobalObject().Get("Number").ToObject(rt).Get("isInteger"))
+	isInt := func(a sobek.Value) bool {
+		v, err := jsIsInt(sobek.Undefined(), a)
 		return err == nil && v.ToBoolean()
 	}
 
@@ -83,16 +62,16 @@ func (mi *ModuleInstance) expectedStatuses(args ...goja.Value) *expectedStatuses
 		if isInt(arg) {
 			result.exact = append(result.exact, int(o.ToInteger()))
 		} else {
-			min := o.Get("min")
-			max := o.Get("max")
-			if min == nil || max == nil {
+			minValue := o.Get("min")
+			maxValue := o.Get("max")
+			if minValue == nil || maxValue == nil {
 				common.Throw(rt, fmt.Errorf(errMsg, i+1))
 			}
-			if !(isInt(min) && isInt(max)) {
+			if !isInt(minValue) || !isInt(maxValue) {
 				common.Throw(rt, fmt.Errorf("both min and max need to be integers for argument number %d", i+1))
 			}
 
-			result.minmax = append(result.minmax, [2]int{int(min.ToInteger()), int(max.ToInteger())})
+			result.minmax = append(result.minmax, [2]int{int(minValue.ToInteger()), int(maxValue.ToInteger())})
 		}
 	}
 	return &result
@@ -101,8 +80,8 @@ func (mi *ModuleInstance) expectedStatuses(args ...goja.Value) *expectedStatuses
 // SetResponseCallback sets the responseCallback to the value provided. Supported values are
 // expectedStatuses object or a `null` which means that metrics shouldn't be tagged as failed and
 // `http_req_failed` should not be emitted - the behaviour previous to this
-func (c *Client) SetResponseCallback(val goja.Value) {
-	if val != nil && !goja.IsNull(val) {
+func (c *Client) SetResponseCallback(val sobek.Value) {
+	if val != nil && !sobek.IsNull(val) {
 		// This is done this way as ExportTo exports functions to empty structs without an error
 		if es, ok := val.Export().(*expectedStatuses); ok {
 			c.responseCallback = es.match

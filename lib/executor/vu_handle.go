@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -27,7 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"go.k6.io/k6/lib"
+	"go.k6.io/k6/v2/lib"
 )
 
 type stateType int32
@@ -245,7 +225,7 @@ func (vh *vuHandle) runLoopsIfPossible(runIter func(context.Context, lib.ActiveV
 				// we need to cancel the context, to return the vu
 				// and because *we* did, lets reinitialize it
 				cancel()
-				vh.ctx, vh.cancel = context.WithCancel(vh.parentCtx)
+				vh.ctx, vh.cancel = context.WithCancel(vh.parentCtx) //nolint:fatcontext // isn't actually on the same context
 			}
 			fallthrough // to set the state
 		case toHardStop:

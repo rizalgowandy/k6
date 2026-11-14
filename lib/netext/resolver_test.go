@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package netext
 
 import (
@@ -29,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.k6.io/k6/lib/testutils/mockresolver"
-	"go.k6.io/k6/lib/types"
+	"go.k6.io/k6/v2/internal/lib/testutils/mockresolver"
+	"go.k6.io/k6/v2/lib/types"
 )
 
 func TestResolver(t *testing.T) {
@@ -46,7 +26,7 @@ func TestResolver(t *testing.T) {
 			net.ParseIP("2001:db8::11"),
 			net.ParseIP("2001:db8::12"),
 		},
-	}, nil)
+	})
 
 	t.Run("LookupIP", func(t *testing.T) {
 		t.Parallel()
@@ -83,7 +63,6 @@ func TestResolver(t *testing.T) {
 		}
 
 		for _, tc := range testCases {
-			tc := tc
 			t.Run(fmt.Sprintf("%s_%s_%s", tc.ttl, tc.sel, tc.pol), func(t *testing.T) {
 				t.Parallel()
 				r := NewResolver(mr.LookupIPAll, tc.ttl, tc.sel, tc.pol)
@@ -93,7 +72,8 @@ func TestResolver(t *testing.T) {
 
 				if tc.ttl > 0 {
 					require.IsType(t, &cacheResolver{}, r)
-					cr := r.(*cacheResolver)
+					cr, ok := r.(*cacheResolver)
+					assert.True(t, ok)
 					assert.Len(t, cr.cache, 1)
 					assert.Equal(t, tc.ttl, cr.ttl)
 					firstLookup := cr.cache[host].lastLookup
@@ -104,8 +84,9 @@ func TestResolver(t *testing.T) {
 				}
 
 				if tc.sel == types.DNSroundRobin {
-					ips := []net.IP{ip}
-					for i := 0; i < 3; i++ {
+					ips := make([]net.IP, 1, 4)
+					ips[0] = ip
+					for range 3 {
 						ip, err = r.LookupIP(host)
 						require.NoError(t, err)
 						ips = append(ips, ip)
